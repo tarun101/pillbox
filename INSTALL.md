@@ -68,9 +68,26 @@ cloudflared tunnel route dns pillbox pi.uprobotics.tech
 sudo cloudflared service install
 ```
 
-**Security note:** the app itself has no authentication. Cloudflare's bot challenge is
-not access control — anyone with the URL can view the camera and delete photos.
-Consider adding a Cloudflare Access policy (free tier) in front of the hostname.
+## Access code
+
+The app is gated by a numeric access code. Set it on the Pi (not in the repo — this
+repo is public):
+
+```
+echo 1234 > ~/.pillbox_pin    # pick your own code
+chmod 600 ~/.pillbox_pin
+systemctl --user restart pillbox
+```
+
+Every page and API endpoint returns the code prompt until the right code is entered;
+a correct entry sets a session cookie good for 30 days (sessions also reset when the
+app restarts). Wrong attempts are slowed to ~1 every 2 seconds. If `~/.pillbox_pin`
+doesn't exist, the app runs open with no code — fine for a LAN-only setup, not
+recommended with the public tunnel hostname.
+
+A 4-digit code plus Cloudflare's bot challenge is reasonable protection for a hobby
+camera, but it's not strong auth — use a longer code (the field takes up to 8 digits)
+or a Cloudflare Access policy if you need better.
 
 ## Hardware notes
 

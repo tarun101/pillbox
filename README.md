@@ -9,6 +9,9 @@ Open **https://pi.uprobotics.tech** on your phone or computer — works from any
 via a Cloudflare Tunnel. (On the home network you can also use `http://<pi-ip>:8000/`
 directly.) You may see a brief Cloudflare "Just a moment…" check before the page loads.
 
+The first visit asks for a **4-digit access code**; after that your browser is
+remembered for 30 days (and until the app restarts).
+
 **Camera page (`/`)**
 - Live preview with a red shutter button — tap it to take a photo.
 - Photos are captured at the camera's full 12MP resolution; a brief "Capturing…"

@@ -16,15 +16,17 @@ Photos land in ~/photos with thumbnails in ~/photos/.thumbs.
 import io
 import json
 import os
+import secrets
 import shutil
 import socketserver
 import tempfile
+import time
 import zipfile
 from datetime import datetime
 from http import server
 from pathlib import Path
 from threading import Condition, Lock
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote
 
 from PIL import Image
 from picamera2 import Picamera2
@@ -38,6 +40,44 @@ STILL_SIZE = (4608, 2592)
 THUMB_MAX = (400, 400)
 LOW_SPACE_WARN = 1024 * 1024 * 1024  # gallery shows a warning below 1GB free
 CAPTURE_MIN_FREE = 200 * 1024 * 1024  # refuse captures below 200MB free
+
+# Access code lives outside the repo (this file is public on GitHub).
+# Put the code in ~/.pillbox_pin on the Pi, e.g.:  echo 1234 > ~/.pillbox_pin
+PIN_FILE = Path.home() / ".pillbox_pin"
+PIN = PIN_FILE.read_text().strip() if PIN_FILE.is_file() else None
+SESSION_TOKEN = secrets.token_hex(16)  # new token per app start
+SESSION_COOKIE = "pillbox_session"
+
+LOGIN_PAGE = """\
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pillbox — enter code</title>
+<style>
+  body { margin:0; background:#111; color:#eee; font-family:-apple-system,sans-serif;
+         display:flex; align-items:center; justify-content:center; height:100vh; }
+  form { text-align:center; }
+  h1 { font-size:20px; margin-bottom:18px; }
+  input { font-size:32px; letter-spacing:12px; text-align:center; width:200px;
+          padding:10px; background:#1c1c1c; color:#eee; border:1px solid #444;
+          border-radius:8px; }
+  button { display:block; margin:18px auto 0; font-size:17px; padding:10px 34px;
+           background:#c33; color:#fff; border:none; border-radius:8px; cursor:pointer; }
+  .err { color:#e66; margin-top:12px; min-height:1.2em; }
+</style>
+</head>
+<body>
+<form method="POST" action="/login">
+  <h1>Enter access code</h1>
+  <input name="code" type="password" inputmode="numeric" autocomplete="one-time-code"
+         maxlength="8" autofocus>
+  <button type="submit">Unlock</button>
+  <div class="err">{error}</div>
+</form>
+</body>
+</html>
+"""
 
 CAPTURE_PAGE = """\
 <!DOCTYPE html>
@@ -214,6 +254,36 @@ def safe_photo_path(base_dir, name):
 
 
 class Handler(server.BaseHTTPRequestHandler):
+    def is_authed(self):
+        if PIN is None:  # no pin file -> no gate (e.g. fresh install)
+            return True
+        cookies = self.headers.get("Cookie", "")
+        return f"{SESSION_COOKIE}={SESSION_TOKEN}" in cookies
+
+    def require_auth(self):
+        """Returns True if the request may proceed; otherwise serves the login page."""
+        if self.is_authed():
+            return True
+        self.send_html(LOGIN_PAGE.replace("{error}", ""), status=401)
+        return False
+
+    def handle_login(self):
+        length = int(self.headers.get("Content-Length", 0))
+        form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        code = (form.get("code") or [""])[0].strip()
+        if PIN is not None and secrets.compare_digest(code, PIN):
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header(
+                "Set-Cookie",
+                f"{SESSION_COOKIE}={SESSION_TOKEN}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax",
+            )
+            self.send_header("Content-Length", 0)
+            self.end_headers()
+        else:
+            time.sleep(2)  # slow down guessing
+            self.send_html(LOGIN_PAGE.replace("{error}", "Wrong code, try again."), status=401)
+
     def send_html(self, html, status=200):
         body = html.encode("utf-8")
         self.send_response(status)
@@ -244,6 +314,8 @@ class Handler(server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path, _, query = self.path.partition("?")
+        if not self.require_auth():
+            return
         if path == "/":
             self.send_html(CAPTURE_PAGE)
         elif path == "/gallery":
@@ -271,6 +343,11 @@ class Handler(server.BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if self.path == "/login":
+            self.handle_login()
+            return
+        if not self.require_auth():
+            return
         if self.path == "/capture":
             free = shutil.disk_usage(PHOTO_DIR).free
             if free < CAPTURE_MIN_FREE:

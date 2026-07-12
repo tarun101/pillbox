@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Same as camera_stream.py but at 1920x1080.
-Note: the imx708 sensor itself goes up to 4608x2592, but the Pi's hardware
+"""Same as camera_stream.py but at 1920x1080 — the max live-stream resolution on a Pi 4.
+The imx708 sensor itself goes up to 4608x2592, but the Pi 4's hardware
 MJPEG/H.264 encoder (bcm2835-codec-encode) caps out at 1920x1920, so 1920x1080
-(16:9) is the actual max resolution usable for a live encoded stream like this.
-Full sensor resolution is only reachable via still-image capture, not video/MJPEG.
+(16:9) is the actual max resolution usable for a live encoded stream on that board.
+For full sensor resolution streaming, use camera_stream_fullres_pi5only.py on a Pi 5.
 """
 import io
 import socketserver

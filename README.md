@@ -1,0 +1,59 @@
+# pillbox
+
+Live preview and still-capture scripts for a Raspberry Pi Camera Module 3 (imx708), using `picamera2`.
+
+## Hardware
+
+- Camera: Raspberry Pi Camera Module 3 (imx708 sensor, 4608x2592 max / 12MP)
+- Tested on both a Raspberry Pi 4 and a Raspberry Pi 5 (same SD card, moved between boards)
+
+The two boards behave differently for **live video/MJPEG streaming** because of a hardware
+difference, not a software one:
+
+| | Pi 4 | Pi 5 |
+|---|---|---|
+| Hardware video encoder | Yes (`bcm2835-codec-encode`) | No — removed in the BCM2712 SoC |
+| Max live-stream resolution | 1920x1920 (hardware ceiling) | Full sensor res (software-encoded, CPU-bound) |
+| Measured full-res (4608x2592) fps | N/A (fails — exceeds encoder limit) | ~10.4 fps |
+
+Still-image capture (`capture_still_fullres.py`) always gets the full 4608x2592 sensor
+resolution on either board, since it doesn't go through the video encoder at all.
+
+## Scripts
+
+- **`camera_stream.py`** — live MJPEG preview at 1024x576. Lightweight, works on any board.
+  Default / recommended for just checking the camera is working.
+- **`camera_stream_1080p_pi4max.py`** — live MJPEG preview at 1920x1080, the max resolution
+  the Pi 4's hardware encoder supports. Also works fine on a Pi 5.
+- **`camera_stream_fullres_pi5only.py`** — live MJPEG preview at the full 4608x2592 sensor
+  resolution. **Pi 5 only** — fails on a Pi 4 (exceeds its hardware encoder's 1920x1920 limit).
+- **`capture_still_fullres.py`** — captures a single still photo at full 4608x2592 resolution.
+  Works on either board. Usage: `python3 capture_still_fullres.py [filename.jpg]`.
+
+## Running a stream
+
+Each streaming script serves an MJPEG feed over HTTP on port 8000:
+
+```
+python3 camera_stream.py
+```
+
+Then open `http://<pi-ip>:8000/` in a browser.
+
+To run it persistently in the background (survives the SSH session ending):
+
+```
+systemd-run --user --unit=camera-stream --collect python3 /home/upr/camera_stream.py
+```
+
+Only one script can hold the camera at a time — stop the running one first:
+
+```
+systemctl --user stop camera-stream
+```
+
+## Notes
+
+- MJPEG streaming and still capture can't run at the same time (both need the camera).
+- Wi-Fi connectivity on these boards has been flaky in testing — if the stream seems dead,
+  check the Pi is still reachable (`ping`) before assuming the script crashed.

@@ -2,6 +2,25 @@
 
 Live preview and still-capture scripts for a Raspberry Pi Camera Module 3 (imx708), using `picamera2`.
 
+## The web app
+
+**`pillbox_app.py`** is the main thing here — a single-process web app (stdlib + PIL only,
+no Flask) that owns the camera and serves on port 8000:
+
+- **`/`** — live preview (1024x576 MJPEG) with a shutter button. Each shot captures at
+  the full 4608x2592 sensor resolution; a "Capturing…" overlay covers the brief preview
+  freeze while the camera switches modes (~0.5s on a Pi 5).
+- **`/gallery`** — thumbnail grid of every photo taken, newest first. Per-photo download
+  and delete, plus a download-everything-as-zip link.
+
+Photos are stored on the Pi in `~/photos` (thumbnails in `~/photos/.thumbs`).
+
+Run it persistently:
+
+```
+systemd-run --user --unit=camera-stream --collect python3 /home/upr/pillbox_app.py
+```
+
 ## Hardware
 
 - Camera: Raspberry Pi Camera Module 3 (imx708 sensor, 4608x2592 max / 12MP)
@@ -19,7 +38,9 @@ difference, not a software one:
 Still-image capture (`capture_still_fullres.py`) always gets the full 4608x2592 sensor
 resolution on either board, since it doesn't go through the video encoder at all.
 
-## Scripts
+## Standalone scripts
+
+Simpler single-purpose scripts that predate the web app:
 
 - **`camera_stream.py`** — live MJPEG preview at 1024x576. Lightweight, works on any board.
   Default / recommended for just checking the camera is working.

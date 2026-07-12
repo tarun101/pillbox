@@ -24,22 +24,29 @@ dialog) below 200MB free. Nothing is ever auto-deleted.
 Dependencies are just `picamera2` and Pillow, both preinstalled on Raspberry Pi OS
 (Bookworm and later) — no pip installs needed.
 
-Copy `pillbox_app.py` to the Pi and run it:
+Copy `pillbox_app.py` to the Pi home directory and try it out:
 
 ```
 python3 pillbox_app.py
 ```
 
-Or run it persistently in the background (survives the SSH session ending):
+To install it as a daemon that auto-starts on boot and restarts on crashes, copy
+`pillbox.service` to the Pi and run:
 
 ```
-systemd-run --user --unit=camera-stream --collect python3 /home/upr/pillbox_app.py
+mkdir -p ~/.config/systemd/user
+cp pillbox.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now pillbox
+loginctl enable-linger $USER   # start at boot without a login session
 ```
 
-Stop it with:
+Manage it with:
 
 ```
-systemctl --user stop camera-stream
+systemctl --user status pillbox    # check it's running
+systemctl --user stop pillbox      # stop (e.g. to run a utils/ script)
+systemctl --user start pillbox     # start again
 ```
 
 ## Hardware notes
@@ -79,4 +86,4 @@ Simpler single-purpose scripts that predate the web app, kept for testing:
 
 Each streaming script serves its MJPEG feed on port 8000 (`python3 utils/camera_stream.py`,
 then open `http://<pi-ip>:8000/`). Only one process can hold the camera at a time — stop
-the web app first (`systemctl --user stop camera-stream`) before running any of these.
+the web app first (`systemctl --user stop pillbox`) before running any of these.

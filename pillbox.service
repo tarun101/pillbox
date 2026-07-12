@@ -1,0 +1,11 @@
+[Unit]
+Description=Pillbox camera web app
+
+[Service]
+ExecStart=/usr/bin/python3 %h/pillbox_app.py
+# Retry if the camera isn't ready yet at boot, or after a crash.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -5,7 +5,9 @@ capture, and a gallery to browse and download what you've taken.
 
 ## Using it
 
-Open `http://<pi-ip>:8000/` on your phone or computer.
+Open **https://pi.uprobotics.tech** on your phone or computer — works from anywhere,
+via a Cloudflare Tunnel. (On the home network you can also use `http://<pi-ip>:8000/`
+directly.) You may see a brief Cloudflare "Just a moment…" check before the page loads.
 
 **Camera page (`/`)**
 - Live preview with a red shutter button — tap it to take a photo.

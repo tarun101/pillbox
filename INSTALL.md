@@ -35,6 +35,43 @@ systemctl --user stop pillbox      # stop (e.g. to run a utils/ script)
 systemctl --user start pillbox     # start again
 ```
 
+## Public access via Cloudflare Tunnel
+
+The app is reachable from anywhere at **https://pi.uprobotics.tech** through a
+Cloudflare Tunnel — no port forwarding, and it works from whichever Wi-Fi network
+the Pi is on (the tunnel dials out from the Pi).
+
+How it was set up (for reference, or to redo on a fresh SD card):
+
+```
+# 1. Install cloudflared (arm64)
+curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -o /tmp/cloudflared.deb
+sudo dpkg -i /tmp/cloudflared.deb
+
+# 2. Authenticate (opens a browser URL — pick the uprobotics.tech zone)
+cloudflared tunnel login
+
+# 3. Create the tunnel and DNS route
+cloudflared tunnel create pillbox
+cloudflared tunnel route dns pillbox pi.uprobotics.tech
+
+# 4. Config lives in /etc/cloudflared/config.yml:
+#      tunnel: <tunnel-id>
+#      credentials-file: /etc/cloudflared/<tunnel-id>.json
+#      ingress:
+#        - hostname: pi.uprobotics.tech
+#          service: http://localhost:8000
+#        - service: http_status:404
+#    (copy the credentials .json from ~/.cloudflared/ to /etc/cloudflared/ too)
+
+# 5. Install as a system service (auto-starts on boot)
+sudo cloudflared service install
+```
+
+**Security note:** the app itself has no authentication. Cloudflare's bot challenge is
+not access control — anyone with the URL can view the camera and delete photos.
+Consider adding a Cloudflare Access policy (free tier) in front of the hostname.
+
 ## Hardware notes
 
 - Camera: Raspberry Pi Camera Module 3 (imx708 sensor, 4608x2592 max / 12MP)

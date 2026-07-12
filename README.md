@@ -39,12 +39,12 @@ difference, not a software one:
 | Max live-stream resolution | 1920x1920 (hardware ceiling) | Full sensor res (software-encoded, CPU-bound) |
 | Measured full-res (4608x2592) fps | N/A (fails — exceeds encoder limit) | ~10.4 fps |
 
-Still-image capture (`capture_still_fullres.py`) always gets the full 4608x2592 sensor
+Still-image capture (`utils/capture_still_fullres.py`) always gets the full 4608x2592 sensor
 resolution on either board, since it doesn't go through the video encoder at all.
 
-## Standalone scripts
+## utils/ — standalone test scripts
 
-Simpler single-purpose scripts that predate the web app:
+Simpler single-purpose scripts that predate the web app, kept for testing:
 
 - **`camera_stream.py`** — live MJPEG preview at 1024x576. Lightweight, works on any board.
   Default / recommended for just checking the camera is working.
@@ -55,27 +55,9 @@ Simpler single-purpose scripts that predate the web app:
 - **`capture_still_fullres.py`** — captures a single still photo at full 4608x2592 resolution.
   Works on either board. Usage: `python3 capture_still_fullres.py [filename.jpg]`.
 
-## Running a stream
-
-Each streaming script serves an MJPEG feed over HTTP on port 8000:
-
-```
-python3 camera_stream.py
-```
-
-Then open `http://<pi-ip>:8000/` in a browser.
-
-To run it persistently in the background (survives the SSH session ending):
-
-```
-systemd-run --user --unit=camera-stream --collect python3 /home/upr/camera_stream.py
-```
-
-Only one script can hold the camera at a time — stop the running one first:
-
-```
-systemctl --user stop camera-stream
-```
+Each streaming script serves its MJPEG feed on port 8000 (`python3 utils/camera_stream.py`,
+then open `http://<pi-ip>:8000/`). Only one process can hold the camera at a time — stop
+the web app first (`systemctl --user stop camera-stream`) before running any of these.
 
 ## Notes
 

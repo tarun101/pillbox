@@ -49,7 +49,10 @@ CAPTURE_PAGE = """\
   body { margin:0; background:#111; color:#eee; font-family:-apple-system,sans-serif; }
   header { display:flex; justify-content:space-between; align-items:center; padding:10px 16px; }
   header a { color:#8bf; text-decoration:none; font-size:16px; }
-  .stage { position:relative; }
+  /* Cap the stage so preview + shutter fit in the viewport on desktop;
+     phones stay edge-to-edge. 190px ~= header + controls height. */
+  .stage { position:relative; margin:0 auto; width:100%;
+           max-width:min(1100px, calc((100vh - 190px) * 16 / 9)); }
   .stage img { width:100%; display:block; }
   #overlay { position:absolute; inset:0; background:rgba(0,0,0,.65); display:none;
              align-items:center; justify-content:center; font-size:22px; }
@@ -126,7 +129,7 @@ GALLERY_PAGE_TOP = """\
   .card input[type=checkbox] { position:absolute; top:8px; left:8px;
                                width:22px; height:22px; accent-color:#c33; }
   .card { position:relative; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr));
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
           gap:12px; padding:12px; }
   .card { background:#1c1c1c; border-radius:8px; overflow:hidden; }
   .card img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; }

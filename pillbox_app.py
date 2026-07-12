@@ -16,6 +16,7 @@ Photos land in ~/photos with thumbnails in ~/photos/.thumbs.
 import io
 import json
 import os
+import shutil
 import socketserver
 import tempfile
 import zipfile
@@ -35,6 +36,8 @@ THUMB_DIR = PHOTO_DIR / ".thumbs"
 STREAM_SIZE = (1024, 576)
 STILL_SIZE = (4608, 2592)
 THUMB_MAX = (400, 400)
+LOW_SPACE_WARN = 1024 * 1024 * 1024  # gallery shows a warning below 1GB free
+CAPTURE_MIN_FREE = 200 * 1024 * 1024  # refuse captures below 200MB free
 
 CAPTURE_PAGE = """\
 <!DOCTYPE html>
@@ -80,6 +83,12 @@ shutter.onclick = async () => {
   try {
     const r = await fetch('/capture', {method: 'POST'});
     const data = await r.json();
+    if (r.status === 507) {
+      overlay.classList.remove('show');
+      shutter.disabled = false;
+      alert(data.error);
+      return;
+    }
     toast.textContent = r.ok ? 'Saved ' + data.file : 'Error: ' + data.error;
     toast.style.background = r.ok ? '#2a2' : '#c33';
   } catch (e) {
@@ -107,6 +116,16 @@ GALLERY_PAGE_TOP = """\
   header { display:flex; justify-content:space-between; align-items:center;
            padding:10px 16px; flex-wrap:wrap; gap:8px; }
   header a { color:#8bf; text-decoration:none; font-size:15px; margin-left:14px; }
+  .stats { padding:0 16px 8px; color:#999; font-size:13px; }
+  .banner { background:#653; color:#fda; padding:10px 16px; font-size:14px; }
+  .toolbar { display:flex; gap:14px; padding:4px 16px 8px; align-items:center; }
+  .toolbar button { background:#333; color:#eee; border:1px solid #555;
+                    border-radius:6px; padding:8px 14px; font-size:14px; cursor:pointer; }
+  .toolbar button.danger { color:#e66; border-color:#844; }
+  .toolbar button:disabled { opacity:.4; }
+  .card input[type=checkbox] { position:absolute; top:8px; left:8px;
+                               width:22px; height:22px; accent-color:#c33; }
+  .card { position:relative; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr));
           gap:12px; padding:12px; }
   .card { background:#1c1c1c; border-radius:8px; overflow:hidden; }
@@ -167,6 +186,20 @@ class Camera:
 
 def list_photos():
     return sorted((p.name for p in PHOTO_DIR.glob("photo_*.jpg")), reverse=True)
+
+
+def fmt_bytes(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit not in ("B", "KB") else f"{n:.0f} {unit}"
+        n /= 1024
+
+
+def storage_stats():
+    photos = list_photos()
+    used = sum((PHOTO_DIR / name).stat().st_size for name in photos)
+    free = shutil.disk_usage(PHOTO_DIR).free
+    return {"count": len(photos), "photos_bytes": used, "free_bytes": free}
 
 
 def safe_photo_path(base_dir, name):
@@ -236,11 +269,34 @@ class Handler(server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/capture":
+            free = shutil.disk_usage(PHOTO_DIR).free
+            if free < CAPTURE_MIN_FREE:
+                self.send_json(
+                    {"error": f"Storage almost full ({fmt_bytes(free)} free). "
+                              "Delete some photos from the gallery first."},
+                    status=507,
+                )
+                return
             try:
                 name = camera.capture_still()
                 self.send_json({"file": name})
             except Exception as e:  # report capture failures to the page
                 self.send_json({"error": str(e)}, status=500)
+        elif self.path == "/delete-many":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                names = json.loads(self.rfile.read(length)).get("names", [])
+            except (json.JSONDecodeError, AttributeError):
+                self.send_error(400)
+                return
+            deleted = []
+            for name in names:
+                p = safe_photo_path(PHOTO_DIR, name)
+                if p:
+                    p.unlink()
+                    (THUMB_DIR / name).unlink(missing_ok=True)
+                    deleted.append(name)
+            self.send_json({"deleted": deleted})
         elif self.path.startswith("/delete/"):
             name = unquote(self.path[len("/delete/"):])
             p = safe_photo_path(PHOTO_DIR, name)
@@ -256,18 +312,36 @@ class Handler(server.BaseHTTPRequestHandler):
 
     def render_gallery(self):
         photos = list_photos()
+        stats = storage_stats()
         parts = [GALLERY_PAGE_TOP]
         parts.append(
             f'<header><b>pillbox gallery ({len(photos)})</b><span>'
             '<a href="/all.zip">Download all (zip)</a>'
             '<a href="/">&larr; Camera</a></span></header>'
         )
+        parts.append(
+            f'<div class="stats">{fmt_bytes(stats["photos_bytes"])} in photos &middot; '
+            f'{fmt_bytes(stats["free_bytes"])} free on card</div>'
+        )
+        if stats["free_bytes"] < LOW_SPACE_WARN:
+            parts.append(
+                '<div class="banner">&#9888; SD card is getting full — captures stop '
+                f'below {fmt_bytes(CAPTURE_MIN_FREE)} free. Delete or download photos.</div>'
+            )
         if not photos:
             parts.append('<div class="empty">No photos yet — go take some.</div>')
+        else:
+            parts.append(
+                '<div class="toolbar">'
+                '<button id="selmode" onclick="toggleSelect()">Select</button>'
+                '<button id="delsel" class="danger" onclick="delSelected()" '
+                'style="display:none" disabled>Delete selected</button></div>'
+            )
         parts.append('<div class="grid">')
         for name in photos:
             parts.append(f"""
 <div class="card" id="card-{name}">
+  <input type="checkbox" class="sel" value="{name}" style="display:none" onchange="selChanged()">
   <a href="/photos/{name}" target="_blank"><img loading="lazy" src="/thumbs/{name}"></a>
   <div class="meta">{name}
     <div class="row">
@@ -283,6 +357,33 @@ async function del(name) {
   if (!confirm('Delete ' + name + '?')) return;
   const r = await fetch('/delete/' + name, {method: 'POST'});
   if (r.ok) document.getElementById('card-' + name).remove();
+}
+let selecting = false;
+function toggleSelect() {
+  selecting = !selecting;
+  document.getElementById('selmode').textContent = selecting ? 'Cancel' : 'Select';
+  document.getElementById('delsel').style.display = selecting ? '' : 'none';
+  document.querySelectorAll('.sel').forEach(cb => {
+    cb.style.display = selecting ? '' : 'none';
+    if (!selecting) cb.checked = false;
+  });
+  selChanged();
+}
+function selChanged() {
+  const n = document.querySelectorAll('.sel:checked').length;
+  const btn = document.getElementById('delsel');
+  btn.disabled = n === 0;
+  btn.textContent = n ? `Delete selected (${n})` : 'Delete selected';
+}
+async function delSelected() {
+  const names = [...document.querySelectorAll('.sel:checked')].map(cb => cb.value);
+  if (!names.length || !confirm(`Delete ${names.length} photo(s)?`)) return;
+  const r = await fetch('/delete-many', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({names}),
+  });
+  if (r.ok) location.reload();
 }
 </script>
 </body>

@@ -11,9 +11,13 @@ no Flask) that owns the camera and serves on port 8000:
   the full 4608x2592 sensor resolution; a "Capturing…" overlay covers the brief preview
   freeze while the camera switches modes (~0.5s on a Pi 5).
 - **`/gallery`** — thumbnail grid of every photo taken, newest first. Per-photo download
-  and delete, plus a download-everything-as-zip link.
+  and delete, bulk select-and-delete, plus a download-everything-as-zip link.
 
 Photos are stored on the Pi in `~/photos` (thumbnails in `~/photos/.thumbs`).
+
+Storage management: the gallery shows space used by photos and free space on the SD
+card, warns when the card drops below 1GB free, and captures are refused (with a
+dialog) below 200MB free. Nothing is ever auto-deleted.
 
 Run it persistently:
 

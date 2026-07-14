@@ -14,3 +14,11 @@ Simpler single-purpose scripts that predate the web app, kept for testing:
 Each streaming script serves its MJPEG feed on port 8000 (`python3 utils/camera_stream.py`,
 then open `http://<pi-ip>:8000/`). Only one process can hold the camera at a time — stop
 the web app first (`systemctl --user stop pillbox`) before running any of these.
+
+## Housekeeping
+
+- **`pi_cleanup.sh`** — removes stray dev-iteration scripts and one-off test images
+  (`test*.jpg`, old `camera_*.py`, `FINAL_RasPi_Code.py`, …) left loose in the Pi home
+  directory. It never touches `photos/`, `pillbox_app.py`, `~/.pillbox_pin`,
+  `~/.cloudflared`, `~/.config`, `~/.ssh`, or any dotfile. Run `bash utils/pi_cleanup.sh`
+  to preview and confirm, or `bash utils/pi_cleanup.sh --yes` to skip the prompt.

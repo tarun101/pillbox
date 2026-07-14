@@ -3,7 +3,27 @@
 Answers "does each of the 21 pillbox cells contain a pill?" for the photos
 the camera app captures into `images/`.
 
-## Pipeline
+There are two classifiers:
+
+- a **CNN** (`pill_classifier.onnx`, used by the app's `/status` page and by
+  `pipeline.analyze()`) — the accurate one; needs `onnxruntime` to run and
+  `torch` only to retrain;
+- a **DoG baseline** (`classify_cells.py`) — no model file needed; used to
+  bootstrap the training labels and still handy as a sanity check.
+
+## Quick start (inference)
+
+```bash
+pip install opencv-python-headless numpy onnxruntime
+python3 -c "
+from detect import pipeline
+print(pipeline.analyze('images/photo_20260713_145101.jpg'))"
+```
+
+The web app's `/status` page calls the same `pipeline.analyze()` on the
+latest capture and renders the 7×3 grid.
+
+## Dataset pipeline
 
 Two independent stages, run from the repo root:
 
@@ -13,7 +33,7 @@ pip install opencv-python-headless numpy
 # 1. locate the box and cut each photo into 21 aligned cell crops
 python3 detect/crop_cells.py --debug
 
-# 2. score each cell for pill presence
+# 2. score each cell for pill presence (DoG baseline)
 python3 detect/classify_cells.py --annotate dataset/annotated
 ```
 
@@ -59,7 +79,7 @@ If you re-shoot the reference/empty photo, update `REF_IMAGE` in
 `crop_cells.py` (recalibrate `REF_QUAD` if the jig moved) and `REF_STEM` in
 `classify_cells.py`.
 
-## Known failure modes (spot-checked against the current photo set)
+### Baseline failure modes (spot-checked against the current photo set)
 
 - **Pill the same colour as its lid** (yellow pill behind the yellow TUE
   lid): near-zero contrast through the plastic → missed (score ≈ 0.003 vs
@@ -67,18 +87,35 @@ If you re-shoot the reference/empty photo, update `REF_IMAGE` in
 - **Strong glare** on a lid occasionally scores just above threshold →
   false alarm (≈ 0.011–0.018).
 
-Everything else — white/coloured pills behind purple, teal, blue, green,
-orange and pink lids — separates cleanly (pill cells score 3–20× the
-threshold, empty cells ≈ 0.000).
+Against the hand-reviewed labels the baseline gets 88.3% of cells right;
+almost all of its misses are camouflaged same-colour pills.
 
-## Next step: small CNN classifier
+## CNN classifier
 
-The scores above make labelling cheap: sort the crops in `dataset/cells/`
-into `pill/` and `empty/` folders (the baseline's verdicts are right ~90–95%
-of the time, so it's a review job, not a labelling job), then fine-tune a
-small image classifier (MobileNetV3 / ResNet-18 / `yolov8n-cls`) on the
-crops. That learns per-column lid tints and glare patterns, which is exactly
-what kills the two failure modes. Full-image object detection (YOLO-detect)
-is *not* recommended here: the table is covered in loose pills and other
-pillboxes, so localizing the box first is mandatory anyway, and per-cell
-classification needs far less labelling effort than bounding boxes.
+`train_classifier.py` trains a small from-scratch CNN (~300 KB as ONNX) on
+the labelled crops and exports `pill_classifier.onnx` plus the 21
+`reference_cells/` crops needed at inference:
+
+```bash
+pip install torch          # training only; inference needs onnxruntime
+python3 detect/crop_cells.py
+python3 detect/train_classifier.py
+```
+
+Design notes:
+
+- The network sees **six channels**: the cell crop *and* the same cell from
+  an empty-box reference photo. That comparison is what makes camouflaged
+  pills separable — they are exactly the cells where a lone crop carries
+  almost no signal.
+- Augmentation applies identical geometric jitter to both halves but
+  independent photometric jitter (auto-exposure really does differ between
+  shots).
+- Train/val split is by capture *scene* (photos seconds apart are
+  near-duplicates and must not straddle the split).
+
+`labels.json` holds the 946 hand-reviewed cell labels (bootstrapped from the
+baseline scores; ~20 genuinely ambiguous cells were dropped). If you add new
+photos: run `crop_cells.py`, extend `labels.json` (the baseline's verdicts
+are right ~90% of the time, so it's a review job, not a labelling job),
+retrain, and commit the new ONNX.

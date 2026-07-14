@@ -1,11 +1,20 @@
 # Install & technical notes
 
-The app is a single file (`pillbox_app.py`) using only `picamera2` and Pillow — both
-preinstalled on Raspberry Pi OS (Bookworm and later). No pip installs needed.
+The camera app (`pillbox_app.py`) uses only `picamera2` and Pillow — both
+preinstalled on Raspberry Pi OS (Bookworm and later). The `/status` pill-detection
+page additionally needs:
+
+```
+pip install opencv-python-headless numpy onnxruntime
+```
+
+Without those the camera and gallery still work; `/status` shows what to install.
+Detection also reads the model and reference images from the repo (`detect/`,
+`images/`), so clone the whole repo rather than copying the single file.
 
 ## Try it out
 
-Copy `pillbox_app.py` to the Pi home directory and run:
+Clone the repo on the Pi and run:
 
 ```
 python3 pillbox_app.py

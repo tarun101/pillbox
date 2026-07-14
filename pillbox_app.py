@@ -5,6 +5,7 @@ One process owns the camera and serves everything on port 8000:
 
   /            live preview + a capture button (full-res stills)
   /gallery     thumbnails of every photo taken; download one, all as zip, or delete
+  /status      which of the 21 pillbox cells contain a pill (latest photo)
   /stream.mjpg the MJPEG feed used by the preview page
 
 Captures are full sensor resolution (4608x2592 on the imx708). The camera has
@@ -109,7 +110,7 @@ CAPTURE_PAGE = """\
 </style>
 </head>
 <body>
-<header><b>pillbox camera</b><a href="/gallery">Gallery &rarr;</a></header>
+<header><b>pillbox camera</b><span><a href="/status" style="margin-right:14px">Status</a><a href="/gallery">Gallery &rarr;</a></span></header>
 <div class="stage">
   <img src="/stream.mjpg" alt="live preview">
   <div id="overlay">Capturing&hellip;</div>
@@ -185,6 +186,72 @@ GALLERY_PAGE_TOP = """\
 """
 
 
+STATUS_PAGE_TOP = """\
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pillbox — status</title>
+<style>
+  body { margin:0; background:#111; color:#eee; font-family:-apple-system,sans-serif; }
+  header { display:flex; justify-content:space-between; align-items:center;
+           padding:10px 16px; flex-wrap:wrap; gap:8px; }
+  header a { color:#8bf; text-decoration:none; font-size:15px; margin-left:14px; }
+  .sub { padding:0 16px 10px; color:#999; font-size:13px; }
+  .sub a { color:#8bf; text-decoration:none; }
+  .wrap { overflow-x:auto; padding:0 12px 20px; }
+  table { border-collapse:separate; border-spacing:6px; margin:0 auto; }
+  th { color:#999; font-size:12px; font-weight:600; padding:2px 4px; }
+  td { width:64px; height:52px; border-radius:8px; text-align:center;
+       font-size:12px; font-weight:600; }
+  td.pill { background:#1d4d1d; color:#8e8; border:1px solid #2a7a2a; }
+  td.empty { background:#222; color:#777; border:1px solid #333; }
+  .err { margin:30px auto; max-width:560px; background:#432; color:#fda;
+         padding:16px 20px; border-radius:10px; font-size:15px; line-height:1.5; }
+  .empty-msg { padding:40px; text-align:center; color:#888; }
+</style>
+</head>
+<body>
+"""
+
+STATUS_DAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+STATUS_SLOTS = ["MORN", "NOON", "NIGHT"]
+
+
+def render_status_page(photo, results, error=None):
+    """Render /status HTML for one photo's per-cell results (or an error)."""
+    parts = [STATUS_PAGE_TOP]
+    parts.append(
+        '<header><b>pillbox status</b><span>'
+        '<a href="/gallery">Gallery</a><a href="/">&larr; Camera</a></span></header>'
+    )
+    if error is not None:
+        parts.append(f'<div class="err">&#9888; {error}</div></body></html>')
+        return "".join(parts)
+    if photo is None:
+        parts.append('<div class="empty-msg">No photos yet — go take some.'
+                     '</div></body></html>')
+        return "".join(parts)
+    n = sum(1 for r in results.values() if r["pill"])
+    parts.append(
+        f'<div class="sub">{n}/21 cells contain a pill &middot; from '
+        f'<a href="/photos/{photo}" target="_blank">{photo}</a></div>'
+    )
+    parts.append('<div class="wrap"><table><tr><th></th>')
+    parts.extend(f"<th>{d}</th>" for d in STATUS_DAYS)
+    parts.append("</tr>")
+    for slot in STATUS_SLOTS:
+        parts.append(f"<tr><th>{slot}</th>")
+        for day in STATUS_DAYS:
+            r = results[f"{day}_{slot}"]
+            cls = "pill" if r["pill"] else "empty"
+            label = "pill" if r["pill"] else "&mdash;"
+            parts.append(f'<td class="{cls}" title="{r["prob"]:.0%}">{label}</td>')
+        parts.append("</tr>")
+    parts.append("</table></div></body></html>")
+    return "".join(parts)
+
+
 class StreamingOutput(io.BufferedIOBase):
     def __init__(self):
         self.frame = None
@@ -229,6 +296,32 @@ class Camera:
 
 def list_photos():
     return sorted((p.name for p in PHOTO_DIR.glob("photo_*.jpg")), reverse=True)
+
+
+STATUS_CACHE = {}  # photo name -> per-cell results
+STATUS_LOCK = Lock()  # one analysis at a time; they're CPU-heavy on the Pi
+
+
+def analyze_photo(name):
+    """Run pill detection on one photo (cached). Returns (results, error)."""
+    if name in STATUS_CACHE:
+        return STATUS_CACHE[name], None
+    import sys
+    repo = str(Path(__file__).resolve().parent)
+    if repo not in sys.path:
+        sys.path.insert(0, repo)
+    try:
+        from detect import pipeline
+    except ImportError as e:
+        return None, (f"pill detection needs extra packages ({e}) — run: "
+                      "pip install opencv-python-headless numpy onnxruntime")
+    try:
+        with STATUS_LOCK:
+            if name not in STATUS_CACHE:  # may have been computed while waiting
+                STATUS_CACHE[name] = pipeline.analyze(PHOTO_DIR / name)
+        return STATUS_CACHE[name], None
+    except pipeline.AnalysisError as e:
+        return None, str(e)
 
 
 def fmt_bytes(n):
@@ -320,6 +413,20 @@ class Handler(server.BaseHTTPRequestHandler):
             self.send_html(CAPTURE_PAGE)
         elif path == "/gallery":
             self.send_html(self.render_gallery())
+        elif path == "/status":
+            q = parse_qs(query)
+            photos = list_photos()
+            name = (q.get("photo") or [None])[0]
+            if name is not None and safe_photo_path(PHOTO_DIR, name) is None:
+                self.send_error(404)
+                return
+            if name is None:
+                name = photos[0] if photos else None
+            if name is None:
+                self.send_html(render_status_page(None, None))
+                return
+            results, err = analyze_photo(name)
+            self.send_html(render_status_page(name, results, error=err))
         elif path == "/stream.mjpg":
             self.stream_mjpeg()
         elif path == "/all.zip":
@@ -396,6 +503,7 @@ class Handler(server.BaseHTTPRequestHandler):
         parts = [GALLERY_PAGE_TOP]
         parts.append(
             f'<header><b>pillbox gallery ({len(photos)})</b><span>'
+            '<a href="/status">Status</a>'
             '<a href="/all.zip">Download all (zip)</a>'
             '<a href="/">&larr; Camera</a></span></header>'
         )

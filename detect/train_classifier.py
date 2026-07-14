@@ -23,7 +23,7 @@ Usage:
     python3 detect/train_classifier.py [--epochs 100] [--val-frac 0.25]
                                        [--out detect/pill_classifier.onnx]
 
-Exports the ONNX model (input: float32 NCHW 1x6x176x128, cell RGB then
+Exports the ONNX model (input: float32 NCHW 1x6x128x96, cell RGB then
 reference RGB, in [0,1]; output: logits for [empty, pill]) and copies the 21
 reference cell crops to detect/reference_cells/ for inference.
 """
@@ -39,7 +39,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-IN_H, IN_W = 176, 128  # cell crops are 380x280, similar aspect
+IN_H, IN_W = 128, 96  # cell crops are 380x280, similar aspect
 REF_STEM = "photo_20260713_142841"  # photo of the completely empty box
 SEED = 0
 
@@ -116,11 +116,11 @@ class Net(nn.Module):
             return [nn.Conv2d(ci, co, 3, padding=1), nn.BatchNorm2d(co),
                     nn.ReLU(inplace=True), nn.MaxPool2d(2)]
         self.features = nn.Sequential(
-            *block(6, 24), *block(24, 48), *block(48, 96), *block(96, 128),
+            *block(6, 16), *block(16, 32), *block(32, 64), *block(64, 96),
         )
         self.head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1), nn.Flatten(),
-            nn.Dropout(0.3), nn.Linear(128, 2),
+            nn.Dropout(0.3), nn.Linear(96, 2),
         )
 
     def forward(self, x):
@@ -141,7 +141,7 @@ def main():
     ap.add_argument("--cells", default="dataset/cells")
     ap.add_argument("--labels", default="detect/labels.json")
     ap.add_argument("--out", default="detect/pill_classifier.onnx")
-    ap.add_argument("--epochs", type=int, default=150)
+    ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--val-frac", type=float, default=0.25)
     ap.add_argument("--batch", type=int, default=64)
     args = ap.parse_args()

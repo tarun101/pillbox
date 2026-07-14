@@ -119,3 +119,19 @@ baseline scores; ~20 genuinely ambiguous cells were dropped). If you add new
 photos: run `crop_cells.py`, extend `labels.json` (the baseline's verdicts
 are right ~90% of the time, so it's a review job, not a labelling job),
 retrain, and commit the new ONNX.
+
+### Accuracy (against the hand-reviewed labels)
+
+| | scene-held-out val (224 cells) | all 946 cells |
+|---|---|---|
+| DoG baseline | — | 88.3% (78 FN / 33 FP) |
+| CNN (shipped) | **87.9%** | 87.7% (56 FN / 60 FP) |
+
+Overall accuracy is comparable, but the error *profiles* differ: the
+baseline's misses are systematic (camouflaged same-colour pills — 33 of its
+78 misses are TUE cells), while the CNN's errors are spread out and its val
+number is measured on scenes it never saw. Larger models / higher input
+resolution did not help (86.2% val) — with only ~18 distinct capture scenes,
+**more photos is the lever that will improve this**, not architecture.
+Expect roughly 2–3 wrong cells per 21-cell photo for now; the `/status`
+tooltips show per-cell confidence.

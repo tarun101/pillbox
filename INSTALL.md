@@ -2,37 +2,45 @@
 
 The camera app (`pillbox_app.py`) uses only `picamera2` and Pillow — both
 preinstalled on Raspberry Pi OS (Bookworm and later). The `/status` pill-detection
-page additionally needs:
-
-```
-pip install opencv-python-headless numpy onnxruntime
-```
-
+page additionally needs `opencv-python-headless`, `numpy` and `onnxruntime`.
 Without those the camera and gallery still work; `/status` shows what to install.
 Detection also reads the model and reference images from the repo (`detect/`,
 `images/`), so clone the whole repo rather than copying the single file.
 
-## Try it out
-
-Clone the repo on the Pi and run:
+Raspberry Pi OS Bookworm blocks system-wide `pip` (PEP 668), so the pip
+packages go in a virtualenv. Create it with `--system-site-packages` — that
+keeps the apt-installed `picamera2` importable from inside the venv:
 
 ```
-python3 pillbox_app.py
+cd ~ && git clone https://github.com/tarun101/pillbox.git
+python3 -m venv --system-site-packages ~/pillbox/venv
+~/pillbox/venv/bin/pip install opencv-python-headless numpy onnxruntime
+```
+
+(The install pulls prebuilt wheels from piwheels; a few minutes on a Pi 4 is
+normal.)
+
+## Try it out
+
+```
+~/pillbox/venv/bin/python3 ~/pillbox/pillbox_app.py
 ```
 
 Then open `http://<pi-ip>:8000/`.
 
 ## Install as a daemon (auto-start on boot)
 
-Copy `pillbox.service` to the Pi and run:
-
 ```
 mkdir -p ~/.config/systemd/user
-cp pillbox.service ~/.config/systemd/user/
+cp ~/pillbox/pillbox.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now pillbox
 loginctl enable-linger $USER   # start at boot without a login session
 ```
+
+The unit runs the app from the repo clone via the venv
+(`~/pillbox/venv/bin/python3 ~/pillbox/pillbox_app.py`). To deploy a new
+version later: `cd ~/pillbox && git pull && systemctl --user restart pillbox`.
 
 The service restarts automatically on crashes (`Restart=always`).
 

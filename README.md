@@ -25,6 +25,14 @@ remembered for 30 days (and until the app restarts).
   runs low you'll be warned; when critically full, capture is blocked until you
   delete or download some photos. Nothing is ever deleted automatically.
 
+**Status (`/status`)**
+- Shows which of the 21 pillbox cells (7 days × morning/noon/night) contain a
+  pill in the latest photo, as a green/grey grid. Append `?photo=<name>` to
+  check an older photo.
+- Detection runs on the Pi with a small CNN — see [detect/README.md](detect/README.md).
+  It needs `opencv-python-headless`, `numpy` and `onnxruntime` installed; the
+  page tells you if something is missing.
+
 Photos live on the Pi in `~/photos`, named by date and time
 (e.g. `photo_20260712_123030.jpg`).
 

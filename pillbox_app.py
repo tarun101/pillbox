@@ -492,6 +492,14 @@ class Handler(server.BaseHTTPRequestHandler):
                 except OSError:
                     failed.append(name)
             self.send_json({"deleted": deleted, "failed": failed})
+        elif self.path == "/selected.zip":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                names = json.loads(self.rfile.read(length)).get("names", [])
+            except (json.JSONDecodeError, AttributeError):
+                self.send_error(400)
+                return
+            self.send_zip(names)
         elif self.path.startswith("/delete/"):
             name = unquote(self.path[len("/delete/"):])
             p = safe_photo_path(PHOTO_DIR, name)
@@ -530,6 +538,8 @@ class Handler(server.BaseHTTPRequestHandler):
             parts.append(
                 '<div class="toolbar">'
                 '<button id="selmode" onclick="toggleSelect()">Select</button>'
+                '<button id="dlsel" onclick="dlSelected()" '
+                'style="display:none" disabled>Download selected</button>'
                 '<button id="delsel" class="danger" onclick="delSelected()" '
                 'style="display:none" disabled>Delete selected</button></div>'
             )
@@ -563,7 +573,9 @@ let selecting = false;
 function toggleSelect() {
   selecting = !selecting;
   document.getElementById('selmode').textContent = selecting ? 'Cancel' : 'Select';
-  document.getElementById('delsel').style.display = selecting ? '' : 'none';
+  const disp = selecting ? '' : 'none';
+  document.getElementById('dlsel').style.display = disp;
+  document.getElementById('delsel').style.display = disp;
   document.querySelectorAll('.card').forEach(c => c.classList.toggle('selecting', selecting));
   document.querySelectorAll('.sel').forEach(cb => {
     cb.style.display = selecting ? '' : 'none';
@@ -585,9 +597,48 @@ function selChanged() {
   document.querySelectorAll('.sel').forEach(cb =>
     cb.closest('.card').classList.toggle('selected', cb.checked));
   const n = document.querySelectorAll('.sel:checked').length;
-  const btn = document.getElementById('delsel');
-  btn.disabled = n === 0;
-  btn.textContent = n ? `Delete selected (${n})` : 'Delete selected';
+  const del = document.getElementById('delsel');
+  del.disabled = n === 0;
+  del.textContent = n ? `Delete selected (${n})` : 'Delete selected';
+  const dl = document.getElementById('dlsel');
+  dl.disabled = n === 0;
+  dl.textContent = n ? `Download selected (${n})` : 'Download selected';
+}
+async function dlSelected() {
+  const names = [...document.querySelectorAll('.sel:checked')].map(cb => cb.value);
+  if (!names.length) return;
+  if (names.length === 1) {  // a single photo downloads directly, no zip to unpack
+    window.location = '/photos/' + encodeURIComponent(names[0]) + '?download';
+    return;
+  }
+  const btn = document.getElementById('dlsel');
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Preparing zip…';
+  try {
+    const r = await fetch('/selected.zip', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({names}),
+    });
+    if (!r.ok) { alert('Download failed (server error). Please try again.'); return; }
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = m ? m[1] : 'pillbox_photos.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Download failed: ' + e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 async function delSelected() {
   const names = [...document.querySelectorAll('.sel:checked')].map(cb => cb.value);
@@ -633,8 +684,16 @@ async function delSelected() {
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def send_zip(self):
-        photos = list_photos()
+    def send_zip(self, names=None):
+        # names=None zips the whole gallery; otherwise just the ones given
+        # (skipping any that don't resolve to a real photo).
+        if names is None:
+            photos = list_photos()
+        else:
+            photos = [n for n in names if safe_photo_path(PHOTO_DIR, n)]
+        if not photos:
+            self.send_error(404)
+            return
         # JPEGs don't recompress, so store rather than deflate; build on disk
         # to keep memory flat regardless of how many photos exist.
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:

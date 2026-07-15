@@ -7,7 +7,54 @@ not needed on the Pi — the classifier remains the production path (see the
 [detection README](../README.md) for why detection is the heavier tool for a
 presence/absence question).
 
-## How it works
+## Two datasets
+
+- **`make_dataset.py` → `dataset/yolo/`** — the original, fully auto
+  pseudo-labels (per individual pill). Fast, but inherits the blob detector's
+  blind spots. Described in "How it works (auto pseudo-labels)" below.
+- **`build_handset.py` → `dataset/yolo_hand/`** — a **hand-labelled** dataset
+  where every box was human-verified and the camouflaged compartments were
+  drawn by hand. This is the better dataset; see "Hand-labelled dataset".
+
+## Hand-labelled dataset (`build_handset.py`)
+
+Labelling philosophy: **one box per occupied compartment**, covering the pill
+cluster — *not* one box per individual pill. That matches the goal (detect
+whether a compartment holds a pill, not count them), stays complete when a
+compartment is packed with overlapping pills, and is what can be labelled
+reliably by eye.
+
+Each box is built like this, for every compartment `../labels.json` marks
+`pill`:
+
+- compare the compartment to the same compartment of the empty-box reference
+  photo and take the bounding box of the **changed region** (printed day/slot
+  text masked out) — small for one pill, large for a packed compartment;
+- compartments where the pill is the **same colour as its lid** change almost
+  nothing, so those use **hand-drawn boxes** I placed by eye at high zoom,
+  frozen in `camo_boxes.json` (36 boxes across 15 compartments).
+
+The pill/empty status of every compartment comes from the hand-reviewed
+`../labels.json`, so no occupied compartment is missed and no empty one is
+boxed. `handset_labels.json` holds every resulting box for inspection.
+
+```bash
+pip install ultralytics
+python3 detect/crop_cells.py               # cell crops (also builds the reference)
+python3 detect/yolo/build_handset.py       # -> dataset/yolo_hand/  (418 boxes, 46 imgs)
+python3 detect/yolo/train.py --data dataset/yolo_hand/pillbox.yaml \
+    --project dataset/yolo_hand/runs
+python3 detect/yolo/detect.py images/photo_20260713_145101.jpg \
+    --weights dataset/yolo_hand/runs/pill/weights/best.pt --out demo.jpg
+```
+
+Honest limits: boxes were placed by visual review, not a pixel-drag tool, so
+they're compartment-accurate rather than pixel-perfect; a box occasionally
+includes a sliver of printed text where a pill sits on it. The truly
+same-colour-as-lid pills are faint even at high zoom, so those ~15 hand boxes
+are best-effort.
+
+## How it works (auto pseudo-labels)
 
 Detectors need bounding-box labels, which this dataset never had. So the
 boxes are **generated, not hand-drawn**:

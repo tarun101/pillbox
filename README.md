@@ -20,7 +20,8 @@ remembered for 30 days (and until the app restarts).
 **Gallery (`/gallery`)**
 - Every photo you've taken, newest first.
 - Download photos one at a time, or everything as a zip.
-- Delete one photo, or use **Select** to delete many at once.
+- Use **Select** to act on many photos at once: **Download selected** (a single
+  photo comes down on its own, several arrive as a zip) or **Delete selected**.
 - Shows how much space photos use and how much is left on the SD card. If the card
   runs low you'll be warned; when critically full, capture is blocked until you
   delete or download some photos. Nothing is ever deleted automatically.

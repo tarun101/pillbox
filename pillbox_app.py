@@ -167,9 +167,12 @@ GALLERY_PAGE_TOP = """\
                     border-radius:6px; padding:8px 14px; font-size:14px; cursor:pointer; }
   .toolbar button.danger { color:#e66; border-color:#844; }
   .toolbar button:disabled { opacity:.4; }
-  .card input[type=checkbox] { position:absolute; top:8px; left:8px;
-                               width:22px; height:22px; accent-color:#c33; }
+  .card input[type=checkbox] { position:absolute; top:8px; left:8px; z-index:2;
+                               width:26px; height:26px; accent-color:#c33; }
   .card { position:relative; }
+  /* In select mode the whole thumbnail toggles selection (see imgClick). */
+  .card.selecting a > img { cursor:pointer; }
+  .card.selected { outline:3px solid #c33; outline-offset:-3px; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
           gap:12px; padding:12px; }
   .card { background:#1c1c1c; border-radius:8px; overflow:hidden; }
@@ -476,14 +479,19 @@ class Handler(server.BaseHTTPRequestHandler):
             except (json.JSONDecodeError, AttributeError):
                 self.send_error(400)
                 return
-            deleted = []
+            deleted, failed = [], []
             for name in names:
                 p = safe_photo_path(PHOTO_DIR, name)
-                if p:
-                    p.unlink()
+                if not p:
+                    failed.append(name)
+                    continue
+                try:  # don't let one bad file abort the whole batch
+                    p.unlink(missing_ok=True)
                     (THUMB_DIR / name).unlink(missing_ok=True)
                     deleted.append(name)
-            self.send_json({"deleted": deleted})
+                except OSError:
+                    failed.append(name)
+            self.send_json({"deleted": deleted, "failed": failed})
         elif self.path.startswith("/delete/"):
             name = unquote(self.path[len("/delete/"):])
             p = safe_photo_path(PHOTO_DIR, name)
@@ -530,7 +538,7 @@ class Handler(server.BaseHTTPRequestHandler):
             parts.append(f"""
 <div class="card" id="card-{name}">
   <input type="checkbox" class="sel" value="{name}" style="display:none" onchange="selChanged()">
-  <a href="/photos/{name}" target="_blank"><img loading="lazy" src="/thumbs/{name}"></a>
+  <a href="/photos/{name}" target="_blank" onclick="return imgClick(event, this)"><img loading="lazy" src="/thumbs/{name}"></a>
   <div class="meta">{name}
     <div class="row">
       <a href="/photos/{name}?download">Download</a>
@@ -543,21 +551,39 @@ class Handler(server.BaseHTTPRequestHandler):
 <script>
 async function del(name) {
   if (!confirm('Delete ' + name + '?')) return;
-  const r = await fetch('/delete/' + name, {method: 'POST'});
-  if (r.ok) document.getElementById('card-' + name).remove();
+  try {
+    const r = await fetch('/delete/' + encodeURIComponent(name), {method: 'POST'});
+    if (r.ok) document.getElementById('card-' + name).remove();
+    else alert('Could not delete ' + name + ' (server error).');
+  } catch (e) {
+    alert('Could not delete ' + name + ': ' + e);
+  }
 }
 let selecting = false;
 function toggleSelect() {
   selecting = !selecting;
   document.getElementById('selmode').textContent = selecting ? 'Cancel' : 'Select';
   document.getElementById('delsel').style.display = selecting ? '' : 'none';
+  document.querySelectorAll('.card').forEach(c => c.classList.toggle('selecting', selecting));
   document.querySelectorAll('.sel').forEach(cb => {
     cb.style.display = selecting ? '' : 'none';
     if (!selecting) cb.checked = false;
   });
   selChanged();
 }
+// While selecting, tapping the thumbnail toggles selection instead of opening
+// the photo — the tiny corner checkbox is too easy to miss, especially on phones.
+function imgClick(e, link) {
+  if (!selecting) return true;  // normal mode: follow the link to the full photo
+  e.preventDefault();
+  const cb = link.closest('.card').querySelector('.sel');
+  cb.checked = !cb.checked;
+  selChanged();
+  return false;
+}
 function selChanged() {
+  document.querySelectorAll('.sel').forEach(cb =>
+    cb.closest('.card').classList.toggle('selected', cb.checked));
   const n = document.querySelectorAll('.sel:checked').length;
   const btn = document.getElementById('delsel');
   btn.disabled = n === 0;
@@ -566,12 +592,20 @@ function selChanged() {
 async function delSelected() {
   const names = [...document.querySelectorAll('.sel:checked')].map(cb => cb.value);
   if (!names.length || !confirm(`Delete ${names.length} photo(s)?`)) return;
-  const r = await fetch('/delete-many', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({names}),
-  });
-  if (r.ok) location.reload();
+  try {
+    const r = await fetch('/delete-many', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({names}),
+    });
+    if (!r.ok) { alert('Delete failed (server error). Please try again.'); return; }
+    const data = await r.json();
+    const failed = (data.failed || []).length;
+    if (failed) alert(`Deleted ${data.deleted.length}; ${failed} could not be deleted.`);
+    location.reload();
+  } catch (e) {
+    alert('Delete failed: ' + e);
+  }
 }
 </script>
 </body>

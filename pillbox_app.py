@@ -5,7 +5,8 @@ One process owns the camera and serves everything on port 8000:
 
   /            live preview + a capture button (full-res stills)
   /gallery     thumbnails of every photo taken; download one, all as zip, or delete
-  /status      which of the 21 pillbox cells contain a pill (latest photo)
+  /status      which of the 21 pillbox cells contain a pill (latest photo),
+               compared across the DoG, CNN and YOLO detectors
   /stream.mjpg the MJPEG feed used by the preview page
 
 Captures are full sensor resolution (4608x2592 on the imx708). The camera has
@@ -20,6 +21,7 @@ import os
 import secrets
 import shutil
 import socketserver
+import sys
 import tempfile
 import time
 import zipfile
@@ -202,6 +204,11 @@ STATUS_PAGE_TOP = """\
   header a { color:#8bf; text-decoration:none; font-size:15px; margin-left:14px; }
   .sub { padding:0 16px 10px; color:#999; font-size:13px; }
   .sub a { color:#8bf; text-decoration:none; }
+  .method { margin:0 0 8px; }
+  .method h2 { display:flex; align-items:baseline; gap:10px; margin:18px 16px 2px;
+               font-size:16px; font-weight:700; }
+  .method h2 .count { color:#999; font-size:13px; font-weight:600; }
+  .method h2 .desc { color:#777; font-size:12px; font-weight:400; }
   .wrap { overflow-x:auto; padding:0 12px 20px; }
   table { border-collapse:separate; border-spacing:6px; margin:0 auto; }
   th { color:#999; font-size:12px; font-weight:600; padding:2px 4px; }
@@ -221,8 +228,39 @@ STATUS_DAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
 STATUS_SLOTS = ["MORN", "NOON", "NIGHT"]
 
 
-def render_status_page(photo, results, error=None):
-    """Render /status HTML for one photo's per-cell results (or an error)."""
+def _cell_title(r, metric):
+    """Tooltip text for one cell, based on the detector's score field."""
+    val = r.get(metric)
+    if not isinstance(val, (int, float)):
+        return ""
+    if metric in ("prob", "conf"):  # 0..1 probabilities read best as percent
+        return f"{val:.0%}"
+    return f"{val:.3f}"  # DoG blob-area score
+
+
+def _render_grid(results, metric):
+    """Render the 7x3 day/slot table for one detector's results."""
+    parts = ['<div class="wrap"><table><tr><th></th>']
+    parts.extend(f"<th>{d}</th>" for d in STATUS_DAYS)
+    parts.append("</tr>")
+    for slot in STATUS_SLOTS:
+        parts.append(f"<tr><th>{slot}</th>")
+        for day in STATUS_DAYS:
+            r = results[f"{day}_{slot}"]
+            cls = "pill" if r["pill"] else "empty"
+            label = "pill" if r["pill"] else "&mdash;"
+            parts.append(f'<td class="{cls}" title="{_cell_title(r, metric)}">{label}</td>')
+        parts.append("</tr>")
+    parts.append("</table></div>")
+    return "".join(parts)
+
+
+def render_status_page(photo, analysis, error=None):
+    """Render /status HTML comparing every detector's per-cell results.
+
+    `analysis` is the mapping returned by analyze_photo(): method key ->
+    {"label", "desc", "metric", "results", "error"}.
+    """
     parts = [STATUS_PAGE_TOP]
     parts.append(
         '<header><b>pillbox status</b><span>'
@@ -235,23 +273,28 @@ def render_status_page(photo, results, error=None):
         parts.append('<div class="empty-msg">No photos yet — go take some.'
                      '</div></body></html>')
         return "".join(parts)
-    n = sum(1 for r in results.values() if r["pill"])
     parts.append(
-        f'<div class="sub">{n}/21 cells contain a pill &middot; from '
+        f'<div class="sub">Detector comparison &middot; from '
         f'<a href="/photos/{photo}" target="_blank">{photo}</a></div>'
     )
-    parts.append('<div class="wrap"><table><tr><th></th>')
-    parts.extend(f"<th>{d}</th>" for d in STATUS_DAYS)
-    parts.append("</tr>")
-    for slot in STATUS_SLOTS:
-        parts.append(f"<tr><th>{slot}</th>")
-        for day in STATUS_DAYS:
-            r = results[f"{day}_{slot}"]
-            cls = "pill" if r["pill"] else "empty"
-            label = "pill" if r["pill"] else "&mdash;"
-            parts.append(f'<td class="{cls}" title="{r["prob"]:.0%}">{label}</td>')
-        parts.append("</tr>")
-    parts.append("</table></div></body></html>")
+    for m in analysis.values():
+        if m["error"] is not None:
+            parts.append(
+                f'<div class="method"><h2>{m["label"]} '
+                f'<span class="desc">{m["desc"]}</span></h2>'
+                f'<div class="err">&#9888; {m["error"]}</div></div>'
+            )
+            continue
+        results = m["results"]
+        n = sum(1 for r in results.values() if r["pill"])
+        parts.append(
+            f'<div class="method"><h2>{m["label"]} '
+            f'<span class="count">{n}/21 cells</span>'
+            f'<span class="desc">{m["desc"]}</span></h2>'
+        )
+        parts.append(_render_grid(results, m["metric"]))
+        parts.append("</div>")
+    parts.append("</body></html>")
     return "".join(parts)
 
 
@@ -301,30 +344,58 @@ def list_photos():
     return sorted((p.name for p in PHOTO_DIR.glob("photo_*.jpg")), reverse=True)
 
 
-STATUS_CACHE = {}  # photo name -> per-cell results
+STATUS_CACHE = {}  # photo name -> {method: {...}} combined detector results
 STATUS_LOCK = Lock()  # one analysis at a time; they're CPU-heavy on the Pi
 
+# Detectors compared on /status. Each module exposes analyze(photo_path) ->
+# {DAY_SLOT: {"pill": bool, <metric>: float}} and raises AnalysisError.
+#   (key, label, one-line description, module, per-cell score field)
+DETECTORS = [
+    ("dog", "DoG",
+     "classical difference-of-Gaussians blob energy vs. the empty box",
+     "detect.classify_cells", "score"),
+    ("cnn", "CNN",
+     "trained reference-differencing classifier (pill_classifier.onnx)",
+     "detect.pipeline", "prob"),
+    ("yolo", "YOLO",
+     "trained YOLO object detector on the warped grid",
+     "detect.yolo.detect", "conf"),
+]
 
-def analyze_photo(name):
-    """Run pill detection on one photo (cached). Returns (results, error)."""
-    if name in STATUS_CACHE:
-        return STATUS_CACHE[name], None
-    import sys
+
+def _run_detector(module_name, photo):
+    """Run one detector on a photo. Returns (results, error_message)."""
+    import importlib
+    try:
+        mod = importlib.import_module(module_name)
+    except ImportError as e:
+        return None, (f"detection needs extra packages ({e}) — run: "
+                      "pip install opencv-python-headless numpy onnxruntime")
+    try:
+        return mod.analyze(PHOTO_DIR / photo), None
+    except Exception as e:  # each detector's AnalysisError is human-readable
+        return None, str(e)
+
+
+def analyze_photo(photo):
+    """Run every detector on one photo (cached).
+
+    Returns {method_key: {"label", "desc", "metric", "results", "error"}}.
+    """
+    if photo in STATUS_CACHE:
+        return STATUS_CACHE[photo]
     repo = str(Path(__file__).resolve().parent)
     if repo not in sys.path:
         sys.path.insert(0, repo)
-    try:
-        from detect import pipeline
-    except ImportError as e:
-        return None, (f"pill detection needs extra packages ({e}) — run: "
-                      "pip install opencv-python-headless numpy onnxruntime")
-    try:
-        with STATUS_LOCK:
-            if name not in STATUS_CACHE:  # may have been computed while waiting
-                STATUS_CACHE[name] = pipeline.analyze(PHOTO_DIR / name)
-        return STATUS_CACHE[name], None
-    except pipeline.AnalysisError as e:
-        return None, str(e)
+    with STATUS_LOCK:
+        if photo not in STATUS_CACHE:  # may have been computed while waiting
+            combined = {}
+            for key, label, desc, module_name, metric in DETECTORS:
+                results, error = _run_detector(module_name, photo)
+                combined[key] = {"label": label, "desc": desc, "metric": metric,
+                                 "results": results, "error": error}
+            STATUS_CACHE[photo] = combined
+    return STATUS_CACHE[photo]
 
 
 def fmt_bytes(n):
@@ -428,8 +499,8 @@ class Handler(server.BaseHTTPRequestHandler):
             if name is None:
                 self.send_html(render_status_page(None, None))
                 return
-            results, err = analyze_photo(name)
-            self.send_html(render_status_page(name, results, error=err))
+            analysis = analyze_photo(name)
+            self.send_html(render_status_page(name, analysis))
         elif path == "/stream.mjpg":
             self.stream_mjpeg()
         elif path == "/all.zip":

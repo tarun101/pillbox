@@ -34,6 +34,7 @@ import cv2
 import numpy as np
 
 REF_STEM = "photo_20260713_142841"  # photo of the completely empty box
+REF_DIR = Path(__file__).parent / "reference_cells"  # empty-box cell crops
 
 DAYS = ["SAT", "FRI", "THU", "WED", "TUE", "MON", "SUN"]
 SLOTS = ["NIGHT", "NOON", "MORN"]
@@ -82,6 +83,67 @@ def cell_score(cell, ref_dog):
     ref = cv2.dilate(ref_dog, np.ones((REF_DILATE, REF_DILATE), np.uint8))
     resid = np.maximum(0, dog - REF_GAIN * ref)
     return float((resid > PIXEL_THRESHOLD).mean())
+
+
+class AnalysisError(Exception):
+    """Photo could not be analysed; str(exc) explains why."""
+
+
+_ref_dog = None  # lazy: per-cell DoG response of the empty-box reference crops
+
+
+def _crop_margin(img):
+    """Drop the MARGIN border strip, matching load_cell() for whole crops."""
+    h, w = img.shape[:2]
+    my, mx = int(h * MARGIN), int(w * MARGIN)
+    return img[my:h - my, mx:w - mx]
+
+
+def _load_refs():
+    global _ref_dog
+    if _ref_dog is not None:
+        return _ref_dog
+    refs = {}
+    for day in DAYS:
+        for slot in SLOTS:
+            key = f"{day}_{slot}"
+            img = cv2.imread(str(REF_DIR / f"{key}.jpg"))
+            if img is None:
+                raise AnalysisError(f"missing reference crop {REF_DIR / f'{key}.jpg'}")
+            refs[key] = dog_response(_crop_margin(img))
+    _ref_dog = refs
+    return refs
+
+
+def analyze(photo_path):
+    """Analyse one photo with the difference-of-Gaussians blob detector.
+
+    Locates and warps the box (same front-end as the CNN pipeline), then
+    scores each cell's band-pass blob energy against the empty-box reference.
+    Returns {DAY_SLOT: {"pill": bool, "score": float}}.
+    """
+    from . import crop_cells
+    refs = _load_refs()
+    img = cv2.imread(str(photo_path))
+    if img is None:
+        raise AnalysisError(f"cannot read image {photo_path}")
+    ref_photo = Path(__file__).parent.parent / "images" / crop_cells.REF_IMAGE
+    if not ref_photo.is_file():
+        raise AnalysisError(f"reference photo not found at {ref_photo}")
+    templates = crop_cells.build_matcher(ref_photo)
+    quad, confs = crop_cells.align_quad(img, templates)
+    if quad is None:
+        conf_str = "/".join(f"{c:.2f}" for c in confs)
+        raise AnalysisError(
+            f"pillbox not found in photo (anchor confidence {conf_str}) — "
+            "is the box in its usual spot?")
+    grid = crop_cells.warp_grid(img, quad)
+    out = {}
+    for day, slot, crop in crop_cells.cell_crops(grid):
+        key = f"{day}_{slot}"
+        score = cell_score(_crop_margin(crop), refs[key])
+        out[key] = {"pill": bool(score > AREA_THRESHOLD), "score": round(score, 4)}
+    return out
 
 
 def annotate(cells_dir, results, out_path):

@@ -7,14 +7,46 @@ not needed on the Pi — the classifier remains the production path (see the
 [detection README](../README.md) for why detection is the heavier tool for a
 presence/absence question).
 
-## Two datasets
+## Three datasets
 
+- **`build_gridset.py` → `dataset/yolo_grid/`** — **grid classification**: each
+  of the 21 compartments is a fixed full-cell box and YOLO just classifies it
+  `pill` / `no_pill`. The most robust framing and the recommended one; see
+  "Grid-classification dataset" immediately below.
+- **`build_handset.py` → `dataset/yolo_hand/`** — a hand-labelled dataset with
+  one box per occupied compartment (covering the pill cluster). See
+  "Hand-labelled dataset".
 - **`make_dataset.py` → `dataset/yolo/`** — the original, fully auto
-  pseudo-labels (per individual pill). Fast, but inherits the blob detector's
-  blind spots. Described in "How it works (auto pseudo-labels)" below.
-- **`build_handset.py` → `dataset/yolo_hand/`** — a **hand-labelled** dataset
-  where every box was human-verified and the camouflaged compartments were
-  drawn by hand. This is the better dataset; see "Hand-labelled dataset".
+  pseudo-labels (per individual pill). Inherits the blob detector's blind
+  spots. See "How it works (auto pseudo-labels)".
+
+## Grid-classification dataset (`build_gridset.py`)
+
+Instead of localising pills, **every compartment is a fixed full-cell box and
+the model only classifies it** `pill` vs `no_pill`. Because the box is always
+the whole compartment there is nothing to localise, so:
+
+- no hand-drawn boxes are needed — the label of each cell comes straight from
+  the hand-reviewed `../labels.json`;
+- it is immune to how the pills sit (one pill, a packed pile, or a pill the
+  same colour as its lid all get the same full-cell box);
+- output is exactly what a pillbox monitor wants: a 7×3 grid of pill / no-pill.
+
+Two classes (`0: no_pill`, `1: pill`); every image has all 21 boxes.
+
+```bash
+pip install ultralytics
+python3 detect/crop_cells.py
+python3 detect/yolo/build_gridset.py       # -> dataset/yolo_grid/
+python3 detect/yolo/train.py --data dataset/yolo_grid/pillbox.yaml \
+    --project dataset/yolo_grid/runs
+python3 detect/yolo/detect.py images/photo_20260713_145101.jpg \
+    --weights dataset/yolo_grid/runs/pill/weights/best.pt --out demo.jpg
+```
+
+`detect.py` auto-detects the model kind from its class names: for a grid model
+it draws every compartment green (pill) or grey (no_pill); for the
+single-class detectors below it draws only the pill boxes.
 
 ## Hand-labelled dataset (`build_handset.py`)
 

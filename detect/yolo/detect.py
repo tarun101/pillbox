@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Run the trained YOLO pill detector on a photo and draw the boxes.
+"""Run a trained YOLO pill model on a photo, draw the boxes, print the grid.
 
 Locates the box and warps to the canonical grid (same front-end as the
-classifier), runs YOLO on the grid, draws the detections, and reports which
-of the 21 cells contain a detected pill (a cell is "pill" if any detection's
-centre falls inside it — presence, not count).
+classifier), runs YOLO, and reports which of the 21 compartments hold a pill.
+
+Two model kinds are supported automatically (read from the model's class
+names):
+  * grid-classification model (`build_gridset.py`) — classes `pill` /
+    `no_pill`, one full-cell box per compartment. Each compartment is drawn in
+    green (pill) or grey (no_pill) and the verdict comes from the box's class.
+  * single-class pill detector (`make_dataset.py` / `build_handset.py`) —
+    class `pill` only; a compartment counts as pill if a detection's centre
+    falls in it.
 
 Usage:
     python3 detect/yolo/detect.py PHOTO.jpg [--weights ...] [--out out.jpg]
@@ -20,7 +27,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from detect import crop_cells  # noqa: E402
 
 DEFAULT_WEIGHTS = Path(__file__).parent.parent.parent / \
-    "dataset/yolo/runs/pill/weights/best.pt"
+    "dataset/yolo_grid/runs/pill/weights/best.pt"
+
+GREEN, GREY = (0, 200, 0), (150, 150, 150)
+
+
+def is_pill_class(name):
+    n = name.lower()
+    return "pill" in n and "no" not in n and "empty" not in n
 
 
 def main():
@@ -36,8 +50,7 @@ def main():
     img = cv2.imread(args.photo)
     if img is None:
         sys.exit(f"cannot read {args.photo}")
-    templates = crop_cells.build_matcher(
-        Path("images") / crop_cells.REF_IMAGE)
+    templates = crop_cells.build_matcher(Path("images") / crop_cells.REF_IMAGE)
     quad, confs = crop_cells.align_quad(img, templates)
     if quad is None:
         sys.exit(f"pillbox not found (anchor conf "
@@ -45,27 +58,46 @@ def main():
     grid = crop_cells.warp_grid(img, quad)
 
     model = YOLO(args.weights)
+    names = model.names
+    multiclass = any(not is_pill_class(n) for n in names.values())
     res = model.predict(grid, conf=args.conf, verbose=False)[0]
 
     CW, CH = crop_cells.CELL_W, crop_cells.CELL_H
-    occupied = set()
+    # best detection per compartment (highest confidence wins)
+    verdict = {}   # (row, col) -> (is_pill, conf)
     vis = grid.copy()
     for box in res.boxes:
         x0, y0, x1, y1 = box.xyxy[0].tolist()
         conf = float(box.conf[0])
+        pill = is_pill_class(names[int(box.cls[0])])
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         col, row = int(cx // CW), int(cy // CH)
-        if 0 <= col < 7 and 0 <= row < 3:
-            occupied.add((row, col))
-        cv2.rectangle(vis, (int(x0), int(y0)), (int(x1), int(y1)), (0, 0, 255), 3)
-        cv2.putText(vis, f"{conf:.2f}", (int(x0), int(y0) - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        if not (0 <= col < 7 and 0 <= row < 3):
+            continue
+        if multiclass:
+            if (row, col) not in verdict or conf > verdict[(row, col)][1]:
+                verdict[(row, col)] = (pill, conf)
+        elif pill:
+            verdict[(row, col)] = (True, max(conf, verdict.get((row, col), (0, 0))[1]))
+
+    # in grid mode, draw every compartment; in single-class mode, draw pill cells
+    for r in range(3):
+        for c in range(7):
+            is_pill, conf = verdict.get((r, c), (False, 0.0))
+            if not multiclass and not is_pill:
+                continue
+            color = GREEN if is_pill else GREY
+            x0, y0 = c * CW, r * CH
+            cv2.rectangle(vis, (x0 + 4, y0 + 4), (x0 + CW - 4, y0 + CH - 4), color, 4)
+            label = ("pill" if is_pill else "no pill") + (f" {conf:.2f}" if conf else "")
+            cv2.putText(vis, label, (x0 + 10, y0 + 34),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     cv2.imwrite(args.out, vis)
 
-    print(f"{len(res.boxes)} pill detections; "
-          f"{len(occupied)}/21 cells occupied")
+    npill = sum(1 for v in verdict.values() if v[0])
+    print(f"{npill}/21 compartments classified pill")
     for r, slot in enumerate(crop_cells.SLOTS):
-        row = " ".join(f"{day}:{'#' if (r, c) in occupied else '.'}"
+        row = " ".join(f"{day}:{'#' if verdict.get((r, c), (False,))[0] else '.'}"
                        for c, day in enumerate(crop_cells.DAYS))
         print(f"  {slot:5s} {row}")
     print(f"annotated image -> {args.out}")

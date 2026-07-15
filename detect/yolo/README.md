@@ -54,6 +54,29 @@ includes a sliver of printed text where a pill sits on it. The truly
 same-colour-as-lid pills are faint even at high zoom, so those ~15 hand boxes
 are best-effort.
 
+### Results
+
+`yolov8n` from scratch, 200 epochs on CPU — clearly better than the auto
+pseudo-label model, and the gain is exactly where it should be (recall):
+
+| metric | auto pseudo-labels (#5) | hand-labelled |
+|---|---|---|
+| precision | 0.46 | 0.41 |
+| recall | 0.21 | **0.30** |
+| mAP@0.5 | 0.18 | **0.27** |
+| mAP@0.5:0.95 | 0.06 | **0.11** |
+
+On **held-out** photos it now boxes occupied compartments including the
+packed box that the per-pill model handled worst — all three SAT
+compartments, all three THU, the FRI/WED clusters:
+
+![hand-labelled detector on held-out photos](demo/handset_detections.jpg)
+
+It still misses some compartments (recall ~0.3) — ~38 scenes / 46 photos is
+a small dataset and the from-scratch init (no COCO warm-start, GitHub blocked
+in the sandbox) caps accuracy. More photos is the lever, as everywhere else
+in this repo.
+
 ## How it works (auto pseudo-labels)
 
 Detectors need bounding-box labels, which this dataset never had. So the

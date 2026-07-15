@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Run a trained YOLO pill model on a photo, draw the boxes, print the grid.
+"""Draw a box around every compartment and label it pill / no-pill.
 
-Locates the box and warps to the canonical grid (same front-end as the
-classifier), runs YOLO, and reports which of the 21 compartments hold a pill.
+Locates the box, warps to the canonical 7x3 grid, decides pill/no-pill for
+each of the 21 compartments, draws each cell green (pill) or grey (no pill),
+and prints the grid.
 
-Two model kinds are supported automatically (read from the model's class
-names):
-  * grid-classification model (`build_gridset.py`) — classes `pill` /
-    `no_pill`, one full-cell box per compartment. Each compartment is drawn in
-    green (pill) or grey (no_pill) and the verdict comes from the box's class.
-  * single-class pill detector (`make_dataset.py` / `build_handset.py`) —
-    class `pill` only; a compartment counts as pill if a detection's centre
-    falls in it.
+Two backends:
+  * default — a trained YOLO grid-classification model (`build_gridset.py`).
+    Honest heads-up: this from-scratch model classifies poorly (it collapses
+    to "no_pill"); telling a pill from an empty tinted lid needs the
+    empty-box reference, which plain RGB YOLO never sees. See the README.
+  * --classifier — the shipped 6-channel classifier (../pipeline.py), which
+    DOES compare against the empty reference and is ~88% accurate. Same
+    visual, trustworthy verdicts. Recommended.
+
+It also still handles the single-class pill detectors
+(`make_dataset.py` / `build_handset.py`): those draw only the pill cells.
 
 Usage:
-    python3 detect/yolo/detect.py PHOTO.jpg [--weights ...] [--out out.jpg]
-                                  [--conf 0.25]
+    python3 detect/yolo/detect.py PHOTO.jpg --classifier --out out.jpg
+    python3 detect/yolo/detect.py PHOTO.jpg [--weights ...] [--conf 0.25]
 """
 import argparse
 import sys
@@ -37,15 +41,50 @@ def is_pill_class(name):
     return "pill" in n and "no" not in n and "empty" not in n
 
 
+def verdict_from_classifier(photo):
+    """(is_pill, prob) per (row, col) from the shipped 6-channel classifier."""
+    from detect import pipeline
+    result = pipeline.analyze(photo)   # {DAY_SLOT: {"pill": bool, "prob": float}}
+    v = {}
+    for r, slot in enumerate(crop_cells.SLOTS):
+        for c, day in enumerate(crop_cells.DAYS):
+            cell = result[f"{day}_{slot}"]
+            v[(r, c)] = (cell["pill"], cell["prob"])
+    return v, True   # multiclass=True -> draw every compartment
+
+
+def verdict_from_yolo(grid, weights, conf):
+    from ultralytics import YOLO
+    model = YOLO(weights)
+    names = model.names
+    multiclass = any(not is_pill_class(n) for n in names.values())
+    res = model.predict(grid, conf=conf, verbose=False)[0]
+    CW, CH = crop_cells.CELL_W, crop_cells.CELL_H
+    v = {}
+    for box in res.boxes:
+        x0, y0, x1, y1 = box.xyxy[0].tolist()
+        bconf = float(box.conf[0])
+        pill = is_pill_class(names[int(box.cls[0])])
+        col, row = int((x0 + x1) / 2 // CW), int((y0 + y1) / 2 // CH)
+        if not (0 <= col < 7 and 0 <= row < 3):
+            continue
+        if multiclass:
+            if (row, col) not in v or bconf > v[(row, col)][1]:
+                v[(row, col)] = (pill, bconf)
+        elif pill:
+            v[(row, col)] = (True, max(bconf, v.get((row, col), (0, 0))[1]))
+    return v, multiclass
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("photo")
+    ap.add_argument("--classifier", action="store_true",
+                    help="use the shipped classifier for verdicts (accurate)")
     ap.add_argument("--weights", default=str(DEFAULT_WEIGHTS))
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--out", default="yolo_detect.jpg")
     args = ap.parse_args()
-
-    from ultralytics import YOLO
 
     img = cv2.imread(args.photo)
     if img is None:
@@ -57,30 +96,13 @@ def main():
                  f"{'/'.join(f'{c:.2f}' for c in confs)})")
     grid = crop_cells.warp_grid(img, quad)
 
-    model = YOLO(args.weights)
-    names = model.names
-    multiclass = any(not is_pill_class(n) for n in names.values())
-    res = model.predict(grid, conf=args.conf, verbose=False)[0]
+    if args.classifier:
+        verdict, multiclass = verdict_from_classifier(args.photo)
+    else:
+        verdict, multiclass = verdict_from_yolo(grid, args.weights, args.conf)
 
     CW, CH = crop_cells.CELL_W, crop_cells.CELL_H
-    # best detection per compartment (highest confidence wins)
-    verdict = {}   # (row, col) -> (is_pill, conf)
     vis = grid.copy()
-    for box in res.boxes:
-        x0, y0, x1, y1 = box.xyxy[0].tolist()
-        conf = float(box.conf[0])
-        pill = is_pill_class(names[int(box.cls[0])])
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        col, row = int(cx // CW), int(cy // CH)
-        if not (0 <= col < 7 and 0 <= row < 3):
-            continue
-        if multiclass:
-            if (row, col) not in verdict or conf > verdict[(row, col)][1]:
-                verdict[(row, col)] = (pill, conf)
-        elif pill:
-            verdict[(row, col)] = (True, max(conf, verdict.get((row, col), (0, 0))[1]))
-
-    # in grid mode, draw every compartment; in single-class mode, draw pill cells
     for r in range(3):
         for c in range(7):
             is_pill, conf = verdict.get((r, c), (False, 0.0))
@@ -95,7 +117,8 @@ def main():
     cv2.imwrite(args.out, vis)
 
     npill = sum(1 for v in verdict.values() if v[0])
-    print(f"{npill}/21 compartments classified pill")
+    print(f"{npill}/21 compartments classified pill "
+          f"({'classifier' if args.classifier else 'YOLO'})")
     for r, slot in enumerate(crop_cells.SLOTS):
         row = " ".join(f"{day}:{'#' if verdict.get((r, c), (False,))[0] else '.'}"
                        for c, day in enumerate(crop_cells.DAYS))

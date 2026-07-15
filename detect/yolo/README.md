@@ -11,8 +11,9 @@ presence/absence question).
 
 - **`build_gridset.py` → `dataset/yolo_grid/`** — **grid classification**: each
   of the 21 compartments is a fixed full-cell box and YOLO just classifies it
-  `pill` / `no_pill`. The most robust framing and the recommended one; see
-  "Grid-classification dataset" immediately below.
+  `pill` / `no_pill`. Clean framing, but the from-scratch YOLO model trains
+  poorly (it collapses to `no_pill`) — see "Grid-classification" below for why,
+  and use `detect.py --classifier` for an accurate version of the same visual.
 - **`build_handset.py` → `dataset/yolo_hand/`** — a hand-labelled dataset with
   one box per occupied compartment (covering the pill cluster). See
   "Hand-labelled dataset".
@@ -40,13 +41,39 @@ python3 detect/crop_cells.py
 python3 detect/yolo/build_gridset.py       # -> dataset/yolo_grid/
 python3 detect/yolo/train.py --data dataset/yolo_grid/pillbox.yaml \
     --project dataset/yolo_grid/runs
-python3 detect/yolo/detect.py images/photo_20260713_145101.jpg \
-    --weights dataset/yolo_grid/runs/pill/weights/best.pt --out demo.jpg
+# accurate version of the same box-per-cell visual (recommended):
+python3 detect/yolo/detect.py images/photo_20260713_152018.jpg --classifier --out demo.jpg
+# the trained YOLO grid model (collapses — see below):
+python3 detect/yolo/detect.py images/photo_20260713_152018.jpg \
+    --weights dataset/yolo_grid/runs/pill/weights/best.pt --out demo_yolo.jpg
 ```
 
-`detect.py` auto-detects the model kind from its class names: for a grid model
-it draws every compartment green (pill) or grey (no_pill); for the
-single-class detectors below it draws only the pill boxes.
+### Why the YOLO grid model fails — and what to use instead
+
+The framing is clean, but a from-scratch YOLO trained on the raw RGB grids
+**collapses to predicting `no_pill` almost everywhere**: on the held-out set
+it scores ~41% per-compartment accuracy, which is essentially the
+"always guess no_pill" majority baseline. On a box that is 21/21 full of
+pills it labels one compartment `pill`.
+
+The reason is the whole point of this repo: **telling a pill from an empty
+compartment through a coloured translucent lid needs the empty-box
+reference to compare against.** The shipped classifier gets this right (~88%)
+because it is fed six channels — the compartment *and* the same compartment of
+the empty reference. A plain RGB YOLO has no reference, so through a tinted
+lid it can't distinguish pill from empty and falls back to the majority class.
+(From-scratch init with no COCO warm-start — GitHub blocked in the sandbox —
+and only ~35 training images don't help either.)
+
+So `detect.py --classifier` renders the exact same box-per-cell pill/no-pill
+grid, but takes each verdict from the accurate classifier (`../pipeline.py`)
+instead of the collapsed YOLO. Top row below is the YOLO grid model on a
+packed box (1/21 pill — wrong); bottom row is `--classifier` (15/21 — right):
+
+![grid: YOLO vs classifier-backed](demo/grid_yolo_vs_classifier.jpg)
+
+`detect.py` auto-detects the model kind from its class names, so it also draws
+the single-class detectors below (pill boxes only).
 
 ## Hand-labelled dataset (`build_handset.py`)
 

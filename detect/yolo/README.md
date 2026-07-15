@@ -32,6 +32,27 @@ python3 detect/yolo/train.py            # -> dataset/yolo/runs/pill/weights/best
 python3 detect/yolo/detect.py images/photo_20260713_145101.jpg --out demo.jpg
 ```
 
+## Results
+
+Trained from scratch (no COCO warm-start — see below), 200 epochs on CPU:
+
+| metric | value |
+|---|---|
+| precision | 0.46 |
+| recall | 0.21 |
+| mAP@0.5 | 0.18 |
+| mAP@0.5:0.95 | 0.06 |
+
+Low by benchmark standards but it does what it says — here it is on a
+**held-out** photo (`images/photo_20260713_145101.jpg`, a scene the model
+never trained on), boxing the white pills through the purple/teal/blue lids:
+
+![YOLO detections on a held-out photo](demo/demo_white_pills_heldout.jpg)
+
+The recall of ~0.2 is visible too: pills in the yellow/green (WED/TUE) lids
+are mostly missed — same-colour-as-lid pills make no blob, so the
+pseudo-labeller never boxed them and the detector never learned them.
+
 ## Caveats (it's a toy)
 
 - **Pseudo-labels inherit the baseline's blind spots**: a pill the same

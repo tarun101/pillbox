@@ -6,3 +6,4 @@ __pycache__/
 !images/**
 dataset/
 !detect/reference_cells/*.jpg
+!detect/yolo/demo/**

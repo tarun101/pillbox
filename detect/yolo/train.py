@@ -42,7 +42,9 @@ def main():
         degrees=5, translate=0.08, scale=0.3, fliplr=0.5, patience=40,
         plots=True, verbose=True,
     )
-    best = Path(args.project) / "pill" / "weights" / "best.pt"
+    # trainer.best is the true best.pt path regardless of how Ultralytics
+    # nested the run directory (project vs. global runs_dir settings).
+    best = Path(model.trainer.best)
     YOLO(str(best)).export(format="onnx", imgsz=args.imgsz, opset=12)
     print(f"done: {best} (+ .onnx)")
 

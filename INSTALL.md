@@ -52,6 +52,38 @@ systemctl --user stop pillbox      # stop (e.g. to run a utils/ script)
 systemctl --user start pillbox     # start again
 ```
 
+## Continuous deployment (auto-deploy on merge)
+
+`.github/workflows/deploy.yml` deploys `main` to the Pi automatically: on every
+push to `main` it does `git reset --hard origin/main` in `~/pillbox` and restarts
+the service. It runs on a **self-hosted GitHub Actions runner on the Pi**, so it
+reuses the same clone and user service described above — no inbound access or
+secrets needed (the repo is public, so the runner's `git fetch` needs no auth).
+
+One-time setup on the Pi:
+
+```
+# On GitHub: repo → Settings → Actions → Runners → New self-hosted runner → Linux / ARM64.
+# That page shows a download block with a token; run it on the Pi, then configure
+# with the "pillbox" label the workflow targets (runs-on: [self-hosted, pillbox]):
+mkdir -p ~/actions-runner && cd ~/actions-runner
+# ...curl the runner tarball shown on that page, then:
+./config.sh --url https://github.com/tarun101/pillbox --token <TOKEN> --labels pillbox --unattended
+
+# Install it as a service so it survives reboots and picks up jobs on boot:
+sudo ./svc.sh install $USER
+sudo ./svc.sh start
+```
+
+The runner must run as the **same user** that owns `~/pillbox` and the `pillbox`
+user service (the workflow calls `systemctl --user restart pillbox`, and linger is
+already enabled from the daemon step above so the user manager is up at boot).
+
+After it's registered, merging any PR into `main` redeploys the Pi within a few
+seconds. You can also trigger it by hand from the repo's **Actions** tab
+("Deploy to Pi" → *Run workflow*). The manual `git pull && systemctl --user
+restart pillbox` still works any time as a fallback.
+
 ## Public access via Cloudflare Tunnel
 
 The app is reachable from anywhere at **https://pi.uprobotics.tech** through a

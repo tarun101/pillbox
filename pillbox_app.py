@@ -83,6 +83,133 @@ LOGIN_PAGE = """\
 </html>
 """
 
+# --- Shared "Analyze" UI (per-photo DoG/CNN/YOLO), used by the gallery cards
+# and by auto-analyze on the capture page. CSS goes inside a page's <style>;
+# ANALYZE_MODAL + ANALYZE_SCRIPT go at the end of its <body>. ---
+ANALYZE_MODAL_CSS = """\
+  /* Analyze modal: shows the DoG/CNN/YOLO grids for one photo. */
+  #amodal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:none;
+            align-items:flex-start; justify-content:center; overflow-y:auto;
+            padding:24px 8px; z-index:10; }
+  #amodal.show { display:flex; }
+  .abox { background:#161616; border:1px solid #333; border-radius:12px;
+          max-width:760px; width:100%; }
+  .ahead { display:flex; justify-content:space-between; align-items:center;
+           padding:14px 18px; border-bottom:1px solid #2a2a2a; }
+  .ahead b { font-size:15px; word-break:break-all; }
+  .ahead button { background:none; border:none; color:#aaa; font-size:22px;
+                  cursor:pointer; line-height:1; padding:0 4px; }
+  #abody { padding:6px 6px 18px; }
+  #abody .method { margin:0 0 6px; }
+  #abody .method h3 { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
+                      margin:16px 14px 2px; font-size:15px; font-weight:700; }
+  #abody .method h3 .count { color:#999; font-size:12px; font-weight:600; }
+  #abody .method h3 .desc { color:#777; font-size:11px; font-weight:400; }
+  #abody .wrap { overflow-x:auto; padding:0 10px 6px; }
+  /* Fixed layout + border-box keeps every cell exactly the same size regardless
+     of its label or 1px border (auto layout let content nudge widths around). */
+  #abody table { table-layout:fixed; border-collapse:separate; border-spacing:5px;
+                 margin:0 auto; }
+  #abody th, #abody td { box-sizing:border-box; width:52px; }
+  #abody th:first-child, #abody td:first-child { width:46px; }
+  #abody th { color:#999; font-size:11px; font-weight:600; padding:2px 4px; }
+  #abody td { height:44px; border-radius:7px; text-align:center;
+              font-size:11px; font-weight:600; }
+  #abody td.pill { background:#1d4d1d; color:#8e8; border:1px solid #2a7a2a; }
+  #abody td.empty { background:#222; color:#777; border:1px solid #333; }
+  .aloading { padding:34px; text-align:center; color:#aaa; font-size:14px; }
+  .aerr { margin:12px 14px; background:#432; color:#fda; padding:12px 16px;
+          border-radius:8px; font-size:13px; line-height:1.5; }
+"""
+
+ANALYZE_MODAL = """\
+<div id="amodal" onclick="closeAnalyze(event)">
+  <div class="abox">
+    <div class="ahead"><b id="atitle"></b><button onclick="closeAnalyze(true)" title="Close">&times;</button></div>
+    <div id="abody"></div>
+  </div>
+</div>
+"""
+
+ANALYZE_SCRIPT = """\
+<script>
+// Per-photo analysis (DoG + CNN + YOLO), same detectors as /status.
+const A_DAYS = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
+const A_SLOTS = ["MORN","NOON","NIGHT"];
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function cellTitle(r, metric) {
+  const v = r[metric];
+  if (typeof v !== 'number') return '';
+  if (metric === 'prob' || metric === 'conf') return Math.round(v * 100) + '%';
+  return v.toFixed(3);
+}
+function renderGrid(results, metric) {
+  let h = '<div class="wrap"><table><tr><th></th>';
+  for (const d of A_DAYS) h += '<th>' + d + '</th>';
+  h += '</tr>';
+  for (const slot of A_SLOTS) {
+    h += '<tr><th>' + slot + '</th>';
+    for (const d of A_DAYS) {
+      const r = results[d + '_' + slot];
+      const cls = r.pill ? 'pill' : 'empty';
+      const label = r.pill ? 'pill' : '—';
+      h += '<td class="' + cls + '" title="' + esc(cellTitle(r, metric)) + '">' + label + '</td>';
+    }
+    h += '</tr>';
+  }
+  return h + '</table></div>';
+}
+function renderAnalysis(data) {
+  let h = '';
+  for (const key of Object.keys(data.methods)) {
+    const m = data.methods[key];
+    h += '<div class="method">';
+    if (m.error) {
+      h += '<h3>' + esc(m.label) + ' <span class="desc">' + esc(m.desc) + '</span></h3>';
+      h += '<div class="aerr">⚠ ' + esc(m.error) + '</div>';
+    } else {
+      h += '<h3>' + esc(m.label) + ' <span class="count">' + m.count +
+           '/21 cells</span> <span class="desc">' + esc(m.desc) + '</span></h3>';
+      h += renderGrid(m.results, m.metric);
+    }
+    h += '</div>';
+  }
+  return h;
+}
+function openAnalyze() { document.getElementById('amodal').classList.add('show'); }
+function closeAnalyze(e) {
+  // Backdrop click closes; clicks inside the box (e.currentTarget !== target) don't.
+  if (e === true || e.target === e.currentTarget) {
+    document.getElementById('amodal').classList.remove('show');
+  }
+}
+async function analyze(name, btn) {
+  const body = document.getElementById('abody');
+  document.getElementById('atitle').textContent = name;
+  body.innerHTML = '<div class="aloading">Running DoG, CNN and YOLO on ' +
+    esc(name) + '&hellip;<br>this can take a moment on the Pi.</div>';
+  openAnalyze();
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/analyze?photo=' + encodeURIComponent(name));
+    const data = await r.json();
+    if (!r.ok) {
+      body.innerHTML = '<div class="aerr">⚠ ' + esc(data.error || 'Analysis failed.') + '</div>';
+    } else {
+      body.innerHTML = renderAnalysis(data);
+    }
+  } catch (e) {
+    body.innerHTML = '<div class="aerr">⚠ ' + esc(e) + '</div>';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+</script>
+"""
+
 CAPTURE_PAGE = """\
 <!DOCTYPE html>
 <html>
@@ -110,6 +237,10 @@ CAPTURE_PAGE = """\
            background:#2a2; color:#fff; padding:8px 18px; border-radius:20px;
            opacity:0; transition:opacity .3s; font-size:15px; }
   #toast.show { opacity:1; }
+  .autoa { display:flex; justify-content:center; align-items:center; gap:8px;
+           padding:0 18px 20px; color:#aaa; font-size:14px; }
+  .autoa input { width:18px; height:18px; accent-color:#2a7a2a; }
+""" + ANALYZE_MODAL_CSS + """\
 </style>
 </head>
 <body>
@@ -119,6 +250,7 @@ CAPTURE_PAGE = """\
   <div id="overlay">Capturing&hellip;</div>
 </div>
 <div class="controls"><button id="shutter" title="Take photo"></button></div>
+<label class="autoa"><input type="checkbox" id="autoanalyze" checked> Analyze automatically after capture</label>
 <div id="toast"></div>
 <script>
 const shutter = document.getElementById('shutter');
@@ -127,6 +259,7 @@ const toast = document.getElementById('toast');
 shutter.onclick = async () => {
   shutter.disabled = true;
   overlay.classList.add('show');
+  let saved = null;
   try {
     const r = await fetch('/capture', {method: 'POST'});
     const data = await r.json();
@@ -136,6 +269,7 @@ shutter.onclick = async () => {
       alert(data.error);
       return;
     }
+    if (r.ok) saved = data.file;
     toast.textContent = r.ok ? 'Saved ' + data.file : 'Error: ' + data.error;
     toast.style.background = r.ok ? '#2a2' : '#c33';
   } catch (e) {
@@ -146,8 +280,11 @@ shutter.onclick = async () => {
   shutter.disabled = false;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 2500);
+  // Kick off the three detectors on the fresh photo and pop the results modal.
+  if (saved && document.getElementById('autoanalyze').checked) analyze(saved);
 };
 </script>
+""" + ANALYZE_SCRIPT + ANALYZE_MODAL + """\
 </body>
 </html>
 """
@@ -190,34 +327,7 @@ GALLERY_PAGE_TOP = """\
                  font-size:13px; cursor:pointer; }
   .analyze-btn:disabled { opacity:.5; cursor:default; }
   .empty { padding:40px; text-align:center; color:#888; }
-  /* Analyze modal: shows the DoG/CNN/YOLO grids for one photo. */
-  #amodal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:none;
-            align-items:flex-start; justify-content:center; overflow-y:auto;
-            padding:24px 8px; z-index:10; }
-  #amodal.show { display:flex; }
-  .abox { background:#161616; border:1px solid #333; border-radius:12px;
-          max-width:760px; width:100%; }
-  .ahead { display:flex; justify-content:space-between; align-items:center;
-           padding:14px 18px; border-bottom:1px solid #2a2a2a; }
-  .ahead b { font-size:15px; word-break:break-all; }
-  .ahead button { background:none; border:none; color:#aaa; font-size:22px;
-                  cursor:pointer; line-height:1; padding:0 4px; }
-  #abody { padding:6px 6px 18px; }
-  #abody .method { margin:0 0 6px; }
-  #abody .method h3 { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
-                      margin:16px 14px 2px; font-size:15px; font-weight:700; }
-  #abody .method h3 .count { color:#999; font-size:12px; font-weight:600; }
-  #abody .method h3 .desc { color:#777; font-size:11px; font-weight:400; }
-  #abody .wrap { overflow-x:auto; padding:0 10px 6px; }
-  #abody table { border-collapse:separate; border-spacing:5px; margin:0 auto; }
-  #abody th { color:#999; font-size:11px; font-weight:600; padding:2px 4px; }
-  #abody td { width:52px; height:44px; border-radius:7px; text-align:center;
-              font-size:11px; font-weight:600; }
-  #abody td.pill { background:#1d4d1d; color:#8e8; border:1px solid #2a7a2a; }
-  #abody td.empty { background:#222; color:#777; border:1px solid #333; }
-  .aloading { padding:34px; text-align:center; color:#aaa; font-size:14px; }
-  .aerr { margin:12px 14px; background:#432; color:#fda; padding:12px 16px;
-          border-radius:8px; font-size:13px; line-height:1.5; }
+""" + ANALYZE_MODAL_CSS + """\
 </style>
 </head>
 <body>
@@ -789,87 +899,8 @@ async function delSelected() {
     alert('Delete failed: ' + e);
   }
 }
-// --- Per-photo analysis (DoG + CNN + YOLO), same detectors as /status ---
-const A_DAYS = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
-const A_SLOTS = ["MORN","NOON","NIGHT"];
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
-function cellTitle(r, metric) {
-  const v = r[metric];
-  if (typeof v !== 'number') return '';
-  if (metric === 'prob' || metric === 'conf') return Math.round(v * 100) + '%';
-  return v.toFixed(3);
-}
-function renderGrid(results, metric) {
-  let h = '<div class="wrap"><table><tr><th></th>';
-  for (const d of A_DAYS) h += '<th>' + d + '</th>';
-  h += '</tr>';
-  for (const slot of A_SLOTS) {
-    h += '<tr><th>' + slot + '</th>';
-    for (const d of A_DAYS) {
-      const r = results[d + '_' + slot];
-      const cls = r.pill ? 'pill' : 'empty';
-      const label = r.pill ? 'pill' : '—';
-      h += '<td class="' + cls + '" title="' + esc(cellTitle(r, metric)) + '">' + label + '</td>';
-    }
-    h += '</tr>';
-  }
-  return h + '</table></div>';
-}
-function renderAnalysis(data) {
-  let h = '';
-  for (const key of Object.keys(data.methods)) {
-    const m = data.methods[key];
-    h += '<div class="method">';
-    if (m.error) {
-      h += '<h3>' + esc(m.label) + ' <span class="desc">' + esc(m.desc) + '</span></h3>';
-      h += '<div class="aerr">⚠ ' + esc(m.error) + '</div>';
-    } else {
-      h += '<h3>' + esc(m.label) + ' <span class="count">' + m.count +
-           '/21 cells</span> <span class="desc">' + esc(m.desc) + '</span></h3>';
-      h += renderGrid(m.results, m.metric);
-    }
-    h += '</div>';
-  }
-  return h;
-}
-function openAnalyze() { document.getElementById('amodal').classList.add('show'); }
-function closeAnalyze(e) {
-  // Backdrop click closes; clicks inside the box (e.currentTarget !== target) don't.
-  if (e === true || e.target === e.currentTarget) {
-    document.getElementById('amodal').classList.remove('show');
-  }
-}
-async function analyze(name, btn) {
-  const body = document.getElementById('abody');
-  document.getElementById('atitle').textContent = name;
-  body.innerHTML = '<div class="aloading">Running DoG, CNN and YOLO on ' +
-    esc(name) + '&hellip;<br>this can take a moment on the Pi.</div>';
-  openAnalyze();
-  if (btn) btn.disabled = true;
-  try {
-    const r = await fetch('/analyze?photo=' + encodeURIComponent(name));
-    const data = await r.json();
-    if (!r.ok) {
-      body.innerHTML = '<div class="aerr">⚠ ' + esc(data.error || 'Analysis failed.') + '</div>';
-    } else {
-      body.innerHTML = renderAnalysis(data);
-    }
-  } catch (e) {
-    body.innerHTML = '<div class="aerr">⚠ ' + esc(e) + '</div>';
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
 </script>
-<div id="amodal" onclick="closeAnalyze(event)">
-  <div class="abox">
-    <div class="ahead"><b id="atitle"></b><button onclick="closeAnalyze(true)" title="Close">&times;</button></div>
-    <div id="abody"></div>
-  </div>
-</div>
+""" + ANALYZE_SCRIPT + ANALYZE_MODAL + """
 </body>
 </html>""")
         return "".join(parts)

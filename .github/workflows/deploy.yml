@@ -1,0 +1,33 @@
+name: Deploy to Pi
+
+# Deploys main to the Raspberry Pi by updating the clone the systemd service
+# runs from (~/pillbox) and restarting it. Runs on a self-hosted runner on the
+# Pi itself — see "Continuous deployment" in INSTALL.md for the one-time setup.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allow manual "Run workflow" from the Actions tab
+
+# Never let two deploys race; queue them instead.
+concurrency:
+  group: deploy-pi
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, pillbox]
+    steps:
+      - name: Update repo and restart pillbox
+        run: |
+          set -euo pipefail
+          cd "$HOME/pillbox"
+          git fetch --prune origin
+          git checkout main
+          git reset --hard origin/main
+          # The app runs as a user service; give systemctl --user its session bus.
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          systemctl --user restart pillbox
+          sleep 2
+          systemctl --user is-active pillbox
+          echo "Deployed $(git rev-parse --short HEAD)"

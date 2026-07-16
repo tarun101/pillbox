@@ -4,7 +4,8 @@
 One process owns the camera and serves everything on port 8000:
 
   /            live preview + a capture button (full-res stills)
-  /gallery     thumbnails of every photo taken; download one, all as zip, or delete
+  /gallery     thumbnails of every photo taken; download one, all as zip, delete,
+               or run all three detectors on a single photo (the Analyze button)
   /status      which of the 21 pillbox cells contain a pill (latest photo),
                compared across the DoG, CNN and YOLO detectors
   /stream.mjpg the MJPEG feed used by the preview page
@@ -184,7 +185,39 @@ GALLERY_PAGE_TOP = """\
   .meta a { color:#8bf; text-decoration:none; }
   .meta button { background:none; border:none; color:#e66; cursor:pointer;
                  font-size:13px; padding:0; }
+  .analyze-btn { display:block; width:100%; margin-top:8px; background:#243; color:#8e8;
+                 border:1px solid #2a7a2a; border-radius:6px; padding:7px 0;
+                 font-size:13px; cursor:pointer; }
+  .analyze-btn:disabled { opacity:.5; cursor:default; }
   .empty { padding:40px; text-align:center; color:#888; }
+  /* Analyze modal: shows the DoG/CNN/YOLO grids for one photo. */
+  #amodal { position:fixed; inset:0; background:rgba(0,0,0,.7); display:none;
+            align-items:flex-start; justify-content:center; overflow-y:auto;
+            padding:24px 8px; z-index:10; }
+  #amodal.show { display:flex; }
+  .abox { background:#161616; border:1px solid #333; border-radius:12px;
+          max-width:760px; width:100%; }
+  .ahead { display:flex; justify-content:space-between; align-items:center;
+           padding:14px 18px; border-bottom:1px solid #2a2a2a; }
+  .ahead b { font-size:15px; word-break:break-all; }
+  .ahead button { background:none; border:none; color:#aaa; font-size:22px;
+                  cursor:pointer; line-height:1; padding:0 4px; }
+  #abody { padding:6px 6px 18px; }
+  #abody .method { margin:0 0 6px; }
+  #abody .method h3 { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
+                      margin:16px 14px 2px; font-size:15px; font-weight:700; }
+  #abody .method h3 .count { color:#999; font-size:12px; font-weight:600; }
+  #abody .method h3 .desc { color:#777; font-size:11px; font-weight:400; }
+  #abody .wrap { overflow-x:auto; padding:0 10px 6px; }
+  #abody table { border-collapse:separate; border-spacing:5px; margin:0 auto; }
+  #abody th { color:#999; font-size:11px; font-weight:600; padding:2px 4px; }
+  #abody td { width:52px; height:44px; border-radius:7px; text-align:center;
+              font-size:11px; font-weight:600; }
+  #abody td.pill { background:#1d4d1d; color:#8e8; border:1px solid #2a7a2a; }
+  #abody td.empty { background:#222; color:#777; border:1px solid #333; }
+  .aloading { padding:34px; text-align:center; color:#aaa; font-size:14px; }
+  .aerr { margin:12px 14px; background:#432; color:#fda; padding:12px 16px;
+          border-radius:8px; font-size:13px; line-height:1.5; }
 </style>
 </head>
 <body>
@@ -398,6 +431,25 @@ def analyze_photo(photo):
     return STATUS_CACHE[photo]
 
 
+def analyze_photo_json(photo):
+    """Shape analyze_photo() output for the gallery's Analyze button.
+
+    Returns {"photo", "methods": {key: {"label", "desc", "metric",
+    "error", "results"?, "count"?}}} — ready to JSON-encode. `count` is the
+    number of cells called "pill"; it and `results` are omitted when the
+    detector errored.
+    """
+    methods = {}
+    for key, m in analyze_photo(photo).items():
+        entry = {"label": m["label"], "desc": m["desc"],
+                 "metric": m["metric"], "error": m["error"]}
+        if m["results"] is not None:
+            entry["results"] = m["results"]
+            entry["count"] = sum(1 for r in m["results"].values() if r["pill"])
+        methods[key] = entry
+    return {"photo": photo, "methods": methods}
+
+
 def fmt_bytes(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
@@ -501,6 +553,13 @@ class Handler(server.BaseHTTPRequestHandler):
                 return
             analysis = analyze_photo(name)
             self.send_html(render_status_page(name, analysis))
+        elif path == "/analyze":
+            q = parse_qs(query)
+            name = (q.get("photo") or [None])[0]
+            if name is None or safe_photo_path(PHOTO_DIR, name) is None:
+                self.send_json({"error": "Unknown photo."}, status=404)
+                return
+            self.send_json(analyze_photo_json(name))
         elif path == "/stream.mjpg":
             self.stream_mjpeg()
         elif path == "/all.zip":
@@ -625,6 +684,7 @@ class Handler(server.BaseHTTPRequestHandler):
       <a href="/photos/{name}?download">Download</a>
       <button onclick="del('{name}')">Delete</button>
     </div>
+    <button class="analyze-btn" onclick="analyze('{name}', this)">Analyze</button>
   </div>
 </div>""")
         parts.append("""
@@ -729,7 +789,87 @@ async function delSelected() {
     alert('Delete failed: ' + e);
   }
 }
+// --- Per-photo analysis (DoG + CNN + YOLO), same detectors as /status ---
+const A_DAYS = ["SUN","MON","TUE","WED","THU","FRI","SAT"];
+const A_SLOTS = ["MORN","NOON","NIGHT"];
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function cellTitle(r, metric) {
+  const v = r[metric];
+  if (typeof v !== 'number') return '';
+  if (metric === 'prob' || metric === 'conf') return Math.round(v * 100) + '%';
+  return v.toFixed(3);
+}
+function renderGrid(results, metric) {
+  let h = '<div class="wrap"><table><tr><th></th>';
+  for (const d of A_DAYS) h += '<th>' + d + '</th>';
+  h += '</tr>';
+  for (const slot of A_SLOTS) {
+    h += '<tr><th>' + slot + '</th>';
+    for (const d of A_DAYS) {
+      const r = results[d + '_' + slot];
+      const cls = r.pill ? 'pill' : 'empty';
+      const label = r.pill ? 'pill' : '—';
+      h += '<td class="' + cls + '" title="' + esc(cellTitle(r, metric)) + '">' + label + '</td>';
+    }
+    h += '</tr>';
+  }
+  return h + '</table></div>';
+}
+function renderAnalysis(data) {
+  let h = '';
+  for (const key of Object.keys(data.methods)) {
+    const m = data.methods[key];
+    h += '<div class="method">';
+    if (m.error) {
+      h += '<h3>' + esc(m.label) + ' <span class="desc">' + esc(m.desc) + '</span></h3>';
+      h += '<div class="aerr">⚠ ' + esc(m.error) + '</div>';
+    } else {
+      h += '<h3>' + esc(m.label) + ' <span class="count">' + m.count +
+           '/21 cells</span> <span class="desc">' + esc(m.desc) + '</span></h3>';
+      h += renderGrid(m.results, m.metric);
+    }
+    h += '</div>';
+  }
+  return h;
+}
+function openAnalyze() { document.getElementById('amodal').classList.add('show'); }
+function closeAnalyze(e) {
+  // Backdrop click closes; clicks inside the box (e.currentTarget !== target) don't.
+  if (e === true || e.target === e.currentTarget) {
+    document.getElementById('amodal').classList.remove('show');
+  }
+}
+async function analyze(name, btn) {
+  const body = document.getElementById('abody');
+  document.getElementById('atitle').textContent = name;
+  body.innerHTML = '<div class="aloading">Running DoG, CNN and YOLO on ' +
+    esc(name) + '&hellip;<br>this can take a moment on the Pi.</div>';
+  openAnalyze();
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/analyze?photo=' + encodeURIComponent(name));
+    const data = await r.json();
+    if (!r.ok) {
+      body.innerHTML = '<div class="aerr">⚠ ' + esc(data.error || 'Analysis failed.') + '</div>';
+    } else {
+      body.innerHTML = renderAnalysis(data);
+    }
+  } catch (e) {
+    body.innerHTML = '<div class="aerr">⚠ ' + esc(e) + '</div>';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 </script>
+<div id="amodal" onclick="closeAnalyze(event)">
+  <div class="abox">
+    <div class="ahead"><b id="atitle"></b><button onclick="closeAnalyze(true)" title="Close">&times;</button></div>
+    <div id="abody"></div>
+  </div>
+</div>
 </body>
 </html>""")
         return "".join(parts)

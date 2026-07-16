@@ -30,8 +30,13 @@ import cv2
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from detect import crop_cells  # noqa: E402
 
-DEFAULT_WEIGHTS = Path(__file__).parent.parent.parent / \
+# Prefer freshly trained weights under dataset/ if present; otherwise fall back
+# to the copy shipped in the repo next to this module, so YOLO works out of the
+# box (dataset/ is gitignored training output and won't exist on a fresh clone).
+_TRAINED_WEIGHTS = Path(__file__).parent.parent.parent / \
     "dataset/yolo_grid/runs/pill/weights/best.pt"
+_SHIPPED_WEIGHTS = Path(__file__).parent / "best.pt"
+DEFAULT_WEIGHTS = _TRAINED_WEIGHTS if _TRAINED_WEIGHTS.is_file() else _SHIPPED_WEIGHTS
 
 GREEN, GREY = (0, 200, 0), (150, 150, 150)
 
@@ -94,8 +99,8 @@ def _load_model(weights=DEFAULT_WEIGHTS):
             "ultralytics is not installed — run: pip install ultralytics")
     if not Path(weights).is_file():
         raise AnalysisError(
-            f"YOLO weights not found at {weights} — train them with "
-            "detect/yolo/train.py (they are not shipped in the repo)")
+            f"YOLO weights not found at {weights} — a trained best.pt ships at "
+            "detect/yolo/best.pt, or train your own with detect/yolo/train.py")
     _model = YOLO(str(weights))
     return _model
 

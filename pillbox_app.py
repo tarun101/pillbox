@@ -42,6 +42,10 @@ from picamera2.outputs import FileOutput
 
 PHOTO_DIR = Path.home() / "photos"
 THUMB_DIR = PHOTO_DIR / ".thumbs"
+# Per-cell ground-truth labels written from the Analyze modal's review UI.
+# Lives in PHOTO_DIR (not the repo clone!) so deploys — which git reset --hard —
+# never wipe it; deploy/sync-data.sh merges it into the pillbox-data repo.
+LABELS_FILE = PHOTO_DIR / "labels.json"
 STREAM_SIZE = (1024, 576)
 STILL_SIZE = (4608, 2592)
 THUMB_MAX = (400, 400)
@@ -125,6 +129,16 @@ ANALYZE_MODAL_CSS = """\
               font-size:11px; font-weight:600; }
   #abody td.pill { background:#1d4d1d; color:#8e8; border:1px solid #2a7a2a; }
   #abody td.empty { background:#222; color:#777; border:1px solid #333; }
+  /* Labeler cells: tappable; skip = excluded from training; amber ring =
+     the detectors disagreed on this cell, review it first. */
+  #abody td.lab { cursor:pointer; -webkit-user-select:none; user-select:none; }
+  #abody td.lab.skip { background:#1c1c2a; color:#78a; border:1px dashed #456; }
+  #abody td.lab.hot { box-shadow:inset 0 0 0 2px #c93; }
+  .lsave { display:flex; gap:12px; align-items:center; margin:4px 14px 10px; }
+  .lsave button { background:#243; color:#8e8; border:1px solid #2a7a2a;
+                  border-radius:6px; padding:7px 16px; font-size:13px; cursor:pointer; }
+  .lsave button:disabled { opacity:.5; }
+  .lsave span { color:#999; font-size:12px; }
   .aloading { padding:34px; text-align:center; color:#aaa; font-size:14px; }
   .aerr { margin:12px 14px; background:#432; color:#fda; padding:12px 16px;
           border-radius:8px; font-size:13px; line-height:1.5; }
@@ -240,6 +254,88 @@ function renderAnalysis(data) {
   }
   return h;
 }
+// --- Ground-truth labeler: review the verdicts above and save per-cell labels
+// for training. Cells cycle pill -> empty -> skip (skip = too ambiguous to
+// train on). An amber ring marks cells where the detectors disagree — the most
+// valuable ones to review. Saved labels land in ~/photos/labels.json on the
+// Pi and are synced to the pillbox-data repo by deploy/sync-data.sh.
+function labelerInit(data, saved) {
+  const votes = {};
+  for (const key of Object.keys(data.methods)) {
+    const m = data.methods[key];
+    if (!m.results) continue;
+    for (const cell of Object.keys(m.results))
+      (votes[cell] = votes[cell] || []).push(m.results[cell].pill);
+  }
+  const init = {}, hot = {};
+  for (const d of A_DAYS) for (const s of A_SLOTS) {
+    const cell = d + '_' + s;
+    const v = votes[cell] || [];
+    const pills = v.filter(Boolean).length;
+    hot[cell] = v.length > 1 && pills > 0 && pills < v.length;
+    init[cell] = saved[cell] ||
+      (v.length ? (pills * 2 >= v.length ? 'pill' : 'empty') : 'skip');
+  }
+  return {init, hot};
+}
+function labText(v) { return v === 'pill' ? 'pill' : v === 'empty' ? '—' : 'skip'; }
+function renderLabeler(data, saved) {
+  const {init, hot} = labelerInit(data, saved);
+  const nHot = Object.values(hot).filter(Boolean).length;
+  const nSaved = Object.keys(saved).length;
+  let h = '<div class="method"><h3>Your labels <span class="desc">tap to cycle ' +
+    'pill / empty / skip' + (nHot ? ' · amber ring = detectors disagree' : '') +
+    '</span></h3>';
+  h += '<div class="wrap"><table><tr><th></th>';
+  for (const d of A_DAYS) h += '<th>' + d + '</th>';
+  h += '</tr>';
+  for (const s of A_SLOTS) {
+    h += '<tr><th>' + s + '</th>';
+    for (const d of A_DAYS) {
+      const cell = d + '_' + s;
+      h += '<td class="lab ' + init[cell] + (hot[cell] ? ' hot' : '') +
+           '" data-cell="' + cell + '" onclick="cycleLabel(this)">' +
+           labText(init[cell]) + '</td>';
+    }
+    h += '</tr>';
+  }
+  h += '</table></div>';
+  h += '<div class="lsave"><button id="lsavebtn" onclick="saveLabels()">Save labels</button>' +
+       '<span id="lstat">' + (nSaved ? nSaved + ' previously saved' : '') + '</span></div></div>';
+  return h;
+}
+function cycleLabel(td) {
+  const next = {pill: 'empty', empty: 'skip', skip: 'pill'};
+  const cur = td.classList.contains('pill') ? 'pill'
+            : td.classList.contains('empty') ? 'empty' : 'skip';
+  td.classList.remove(cur);
+  td.classList.add(next[cur]);
+  td.textContent = labText(next[cur]);
+}
+async function saveLabels() {
+  const name = document.getElementById('atitle').textContent;
+  const labels = {};  // skip -> null so an earlier saved label gets removed
+  document.querySelectorAll('#abody td.lab').forEach(td => {
+    labels[td.dataset.cell] = td.classList.contains('pill') ? 'pill'
+      : td.classList.contains('empty') ? 'empty' : null;
+  });
+  const btn = document.getElementById('lsavebtn');
+  const stat = document.getElementById('lstat');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/label', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo: name, labels}),
+    });
+    const data = await r.json();
+    stat.textContent = r.ok ? data.saved + ' labels saved ✓'
+                            : (data.error || 'Save failed.');
+  } catch (e) {
+    stat.textContent = 'Save failed: ' + e;
+  }
+  btn.disabled = false;
+}
 function openAnalyze() { document.getElementById('amodal').classList.add('show'); }
 function closeAnalyze(e) {
   // Backdrop click closes; clicks inside the box (e.currentTarget !== target) don't.
@@ -265,7 +361,12 @@ async function analyze(name, btn) {
       // Power figures below are each detector's draw above this idle baseline.
       if (data.baseline_watts != null)
         base.textContent = 'idle ' + data.baseline_watts.toFixed(1) + ' W';
-      body.innerHTML = renderAnalysis(data);
+      let saved = {};
+      try {  // previously saved ground-truth labels prefill the review grid
+        const lr = await fetch('/labels?photo=' + encodeURIComponent(name));
+        if (lr.ok) saved = (await lr.json()).labels || {};
+      } catch (e) {}
+      body.innerHTML = renderAnalysis(data) + renderLabeler(data, saved);
     }
   } catch (e) {
     body.innerHTML = '<div class="aerr">⚠ ' + esc(e) + '</div>';
@@ -590,6 +691,49 @@ def list_photos():
 STATUS_CACHE = {}  # photo name -> {method: {...}} combined detector results
 STATUS_LOCK = Lock()  # one analysis at a time; they're CPU-heavy on the Pi
 
+LABELS_LOCK = Lock()  # serialize read-modify-write of LABELS_FILE
+VALID_CELLS = {f"{d}_{s}" for d in STATUS_DAYS for s in STATUS_SLOTS}
+
+
+def _load_all_labels():
+    """The label store: {"<photo stem>/<DAY_SLOT>": "pill"|"empty"}."""
+    try:
+        return json.loads(LABELS_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def get_photo_labels(photo):
+    """Saved labels for one photo: {DAY_SLOT: "pill"|"empty"}."""
+    stem = Path(photo).stem
+    prefix = f"{stem}/"
+    return {k[len(prefix):]: v for k, v in _load_all_labels().items()
+            if k.startswith(prefix)}
+
+
+def save_photo_labels(photo, labels):
+    """Merge one photo's reviewed labels into the store (atomic rewrite).
+
+    `labels` maps DAY_SLOT -> "pill" | "empty" | None (None deletes — the
+    reviewer marked the cell as too ambiguous to train on). Returns the number
+    of labels now stored for this photo.
+    """
+    stem = Path(photo).stem
+    with LABELS_LOCK:
+        store = _load_all_labels()
+        for cell, val in labels.items():
+            if cell not in VALID_CELLS:
+                continue
+            key = f"{stem}/{cell}"
+            if val in ("pill", "empty"):
+                store[key] = val
+            elif val is None:
+                store.pop(key, None)
+        tmp = LABELS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(store, indent=1, sort_keys=True))
+        tmp.replace(LABELS_FILE)
+        return sum(1 for k in store if k.startswith(f"{stem}/"))
+
 # Detectors compared on /status. Each module exposes analyze(photo_path) ->
 # {DAY_SLOT: {"pill": bool, <metric>: float}} and raises AnalysisError.
 #   (key, label, one-line description, module, per-cell score field)
@@ -881,6 +1025,13 @@ class Handler(server.BaseHTTPRequestHandler):
                 self.send_json({"error": "Unknown photo."}, status=404)
                 return
             self.send_json(analyze_photo_json(name))
+        elif path == "/labels":
+            q = parse_qs(query)
+            name = (q.get("photo") or [None])[0]
+            if name is None or safe_photo_path(PHOTO_DIR, name) is None:
+                self.send_json({"error": "Unknown photo."}, status=404)
+                return
+            self.send_json({"photo": name, "labels": get_photo_labels(name)})
         elif path == "/stream.mjpg":
             self.stream_mjpeg()
         elif path == "/all.zip":
@@ -923,6 +1074,21 @@ class Handler(server.BaseHTTPRequestHandler):
                 self.send_json({"file": name})
             except Exception as e:  # report capture failures to the page
                 self.send_json({"error": str(e)}, status=500)
+        elif self.path == "/label":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                data = json.loads(self.rfile.read(length))
+                name = data["photo"]
+                labels = data["labels"]
+                assert isinstance(labels, dict)
+            except (json.JSONDecodeError, KeyError, AssertionError, TypeError):
+                self.send_error(400)
+                return
+            if safe_photo_path(PHOTO_DIR, name) is None:
+                self.send_json({"error": "Unknown photo."}, status=404)
+                return
+            n = save_photo_labels(name, labels)
+            self.send_json({"photo": name, "saved": n})
         elif self.path == "/delete-many":
             length = int(self.headers.get("Content-Length", 0))
             try:

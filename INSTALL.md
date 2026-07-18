@@ -109,11 +109,32 @@ SD cards die) and not in this app repo (it would bloat it). Layout:
 
 ```
 pillbox-data/
-  raw/YYYY-MM-DD/photo_*.jpg     every capture, filed by date
-  references/<set-id>/           empty-box reference sets, versioned
-  labels/labels.json             per-cell ground truth
-  splits/{train,val,test}.txt    split BY SCENE; test frozen, never trained on
+  raw/YYYY-MM-DD/photo_*.jpg      every capture, filed by date (source of truth)
+  references/<set-id>/            empty-box reference sets, versioned
+  labels/labels.json              per-cell ground truth
+  splits/{train,valid,test}.txt   split BY SCENE; test frozen, never trained on
+  models/<detector>/<version>/    model registry: weights + card.json
+                                  (who trained it, data commit, test metrics)
+  export/                         generated Train|Valid|Test / Full|Empty tree
+                                  (gitignore it — regenerate, don't commit)
 ```
+
+Only sources of truth are stored — cropped cells are derived data and go stale
+whenever the warp calibration changes, so they are **generated on demand**:
+
+- `detect/make_splits.py --data ~/pillbox-data` groups photos into capture
+  scenes (shots seconds apart are near-duplicates) and assigns each NEW scene
+  to train/valid/test, append-only — already-assigned photos, the test set
+  above all, are never moved. The sync script runs this automatically.
+- `detect/export_dataset.py --data ~/pillbox-data` regenerates the
+  Ultralytics-classify folder tree (`Train/Full`, `Train/Empty`, `Valid/…`,
+  `Test/…`, filenames `<photo stem>_<DAY>_<SLOT>.jpg`) from raw + labels +
+  splits — ready for YOLO training, always in sync with label corrections.
+
+To promote a model: evaluate candidates from `models/` against the frozen test
+split, copy the winner into this repo (`detect/pill_classifier.onnx` or
+`detect/yolo/best.onnx`) via a PR, and merging deploys it — the PR diff is the
+audit log and rollback is `git revert`.
 
 Labels come from the app itself: the gallery's **Analyze** modal has a
 "Your labels" review grid (prefilled with the detectors' majority vote,

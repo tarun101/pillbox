@@ -25,12 +25,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# Cap worker threads so a burst of detection doesn't peg every core at once —
-# that CPU/power spike can brown out or overheat a Pi (the whole board can reset
-# under load on a marginal supply). Tunable via PILLBOX_THREADS (default 2); the
-# ONNX detectors read CPU_THREADS too. Set PILLBOX_THREADS=0 to use all cores.
-_req = os.environ.get("PILLBOX_THREADS", "2")
-CPU_THREADS = int(_req) if _req.strip() else 2
+# Worker-thread knob for the detectors. Default 0 = use all cores (fastest).
+# On a marginal power supply the resulting CPU burst can brown out the Pi —
+# set PILLBOX_THREADS=1 or 2 in the service environment to trade speed for a
+# lower peak draw. The ONNX detectors read CPU_THREADS too.
+_req = os.environ.get("PILLBOX_THREADS", "0")
+CPU_THREADS = int(_req) if _req.strip() else 0
 cv2.setNumThreads(CPU_THREADS)  # 0 -> OpenCV uses all cores
 
 # ---- calibration (relative to REF_IMAGE, full-resolution pixels) ----------

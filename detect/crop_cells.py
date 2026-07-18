@@ -18,11 +18,20 @@ With --debug, also writes <photo stem>_grid.jpg overlays under --out/.debug/
 showing where the grid landed, for visual QA.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+# Cap worker threads so a burst of detection doesn't peg every core at once —
+# that CPU/power spike can brown out or overheat a Pi (the whole board can reset
+# under load on a marginal supply). Tunable via PILLBOX_THREADS (default 2); the
+# ONNX detectors read CPU_THREADS too. Set PILLBOX_THREADS=0 to use all cores.
+_req = os.environ.get("PILLBOX_THREADS", "2")
+CPU_THREADS = int(_req) if _req.strip() else 2
+cv2.setNumThreads(CPU_THREADS)  # 0 -> OpenCV uses all cores
 
 # ---- calibration (relative to REF_IMAGE, full-resolution pixels) ----------
 REF_IMAGE = "photo_20260713_142841.jpg"

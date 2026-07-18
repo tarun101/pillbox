@@ -59,6 +59,7 @@ LOGIN_PAGE = """\
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pillbox — enter code</title>
 <style>
@@ -144,13 +145,23 @@ ANALYZE_MODAL_CSS = """\
     #abody th { font-size:10px; padding:1px; }
     #abody td { height:31px; font-size:10px; }
   }
-  /* Wider screens: lay the detector grids side by side (wrapping) so all
-     three fit without scrolling and the horizontal space isn't wasted. */
+  /* Wider screens: lay the three detector grids side by side in one row with
+     smaller cells so they fit without scrolling, instead of stacking and
+     wasting the horizontal space. Each grid is a flex column that splits the
+     width equally (table width:100%), and its header wraps within it so a long
+     detector description doesn't force the column wide. */
   @media (min-width: 700px) {
-    .abox { max-width:1040px; }
+    .abox { max-width:1120px; }
     #abody { display:flex; flex-wrap:wrap; justify-content:center;
-             align-items:flex-start; gap:0 14px; padding-bottom:12px; }
-    #abody .method { flex:0 1 auto; }
+             align-items:flex-start; gap:6px 14px; padding-bottom:14px; }
+    #abody .method { flex:1 1 300px; min-width:280px; max-width:350px; margin:0; }
+    #abody .method h3 { margin:10px 6px 3px; }
+    #abody .wrap { padding:0 4px 4px; }
+    #abody table { width:100%; border-spacing:5px; }
+    #abody th, #abody td { width:auto; }
+    #abody th:first-child, #abody td:first-child { width:38px; }
+    #abody th { font-size:11px; }
+    #abody td { height:36px; font-size:11px; }
   }
 """
 
@@ -259,6 +270,7 @@ CAPTURE_PAGE = """\
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pillbox — camera</title>
 <style>
@@ -325,8 +337,21 @@ shutter.onclick = async () => {
   shutter.disabled = false;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 2500);
-  // Kick off the three detectors on the fresh photo and pop the results modal.
-  if (saved && document.getElementById('autoanalyze').checked) analyze(saved);
+  // Auto-analyze: the still capture is the camera's biggest power transient,
+  // and running the detectors while also serving the live preview stacks the
+  // load high enough to brown out a marginal supply. Pause the preview while
+  // the detectors run and give the capture transient a moment to settle.
+  if (saved && document.getElementById('autoanalyze').checked) {
+    const preview = document.querySelector('.stage img');
+    const src = preview.src;
+    preview.removeAttribute('src');   // drop the MJPEG connection
+    try {
+      await new Promise(res => setTimeout(res, 800));  // let the board settle
+      await analyze(saved);
+    } finally {
+      preview.src = src;              // resume the live preview
+    }
+  }
 };
 </script>
 """ + ANALYZE_SCRIPT + ANALYZE_MODAL + """\
@@ -338,6 +363,7 @@ GALLERY_PAGE_TOP = """\
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pillbox — gallery</title>
 <style>
@@ -383,6 +409,7 @@ STATUS_PAGE_TOP = """\
 <!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pillbox — status</title>
 <style>
@@ -619,7 +646,7 @@ class _Meter:
         return self
 
     def _poll(self):
-        while not self._stop.wait(0.15):
+        while not self._stop.wait(0.25):
             w = _read_power_watts()
             if w is not None:
                 self.samples.append(w)
@@ -757,7 +784,9 @@ class Handler(server.BaseHTTPRequestHandler):
     def send_html(self, html, status=200):
         body = html.encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "text/html")
+        # charset matters: the pages use real Unicode (— em-dash, · middot) that
+        # renders as mojibake if the browser guesses a non-UTF-8 encoding.
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", len(body))
         self.end_headers()
         self.wfile.write(body)

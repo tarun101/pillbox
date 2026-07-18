@@ -53,7 +53,11 @@ def _load():
     if not MODEL_PATH.is_file():
         raise AnalysisError(f"model not found at {MODEL_PATH} — "
                             "run detect/train_classifier.py or pull it from git")
-    _session = onnxruntime.InferenceSession(str(MODEL_PATH))
+    so = onnxruntime.SessionOptions()
+    so.intra_op_num_threads = crop_cells.CPU_THREADS  # 0 -> onnxruntime default
+    so.inter_op_num_threads = 1
+    _session = onnxruntime.InferenceSession(
+        str(MODEL_PATH), sess_options=so, providers=["CPUExecutionProvider"])
     h, w = _input_size(_session)
     refs = {}
     for day in crop_cells.DAYS:

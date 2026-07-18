@@ -67,8 +67,11 @@ def _load_session(weights=DEFAULT_WEIGHTS):
             f"YOLO weights not found at {weights} — a trained best.onnx ships "
             "at detect/yolo/best.onnx; export your own with "
             "'yolo export model=best.pt format=onnx imgsz=640'")
+    so = onnxruntime.SessionOptions()
+    so.intra_op_num_threads = crop_cells.CPU_THREADS  # 0 -> onnxruntime default
+    so.inter_op_num_threads = 1
     _session = onnxruntime.InferenceSession(
-        str(weights), providers=["CPUExecutionProvider"])
+        str(weights), sess_options=so, providers=["CPUExecutionProvider"])
     meta = _session.get_modelmeta().custom_metadata_map
     _names = ast.literal_eval(meta["names"]) if "names" in meta else {0: "Empty", 1: "Full"}
     _pill_idx = next((i for i, n in _names.items() if is_pill_class(n)), max(_names))

@@ -130,18 +130,19 @@ ANALYZE_MODAL_CSS = """\
      uniform instead of shrinking to unequal rounded widths (which looked like
      pill/empty cells being different sizes). */
   @media (max-width: 480px) {
-    #amodal { padding:12px 4px; align-items:stretch; }
+    #amodal { padding:6px 4px; }
     .abox { border-radius:10px; }
-    .ahead { padding:12px 14px; }
+    .ahead { padding:8px 12px; }
     .ahead b { font-size:14px; }
-    #abody { padding:4px 2px 14px; }
-    #abody .method h3 { margin:12px 10px 2px; font-size:14px; gap:6px; }
-    #abody .wrap { padding:0 6px 6px; }
-    #abody table { width:100%; border-spacing:4px; }
+    #abody { padding:2px 2px 6px; }
+    #abody .method { margin:0; }
+    #abody .method h3 { margin:6px 10px 1px; font-size:13px; gap:6px; }
+    #abody .wrap { padding:0 6px 3px; }
+    #abody table { width:100%; border-spacing:3px; }
     #abody th, #abody td { width:auto; }
-    #abody th:first-child, #abody td:first-child { width:30px; }
-    #abody th { font-size:10px; padding:2px 1px; }
-    #abody td { height:40px; font-size:10px; }
+    #abody th:first-child, #abody td:first-child { width:28px; }
+    #abody th { font-size:10px; padding:1px; }
+    #abody td { height:31px; font-size:10px; }
   }
 """
 

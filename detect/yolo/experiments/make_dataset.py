@@ -28,7 +28,7 @@ import cv2
 import numpy as np
 
 import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 from detect import crop_cells  # noqa: E402
 
 # DoG blob params (mirror classify_cells.py, tuned for the grid cell size)

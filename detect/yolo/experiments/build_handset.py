@@ -31,7 +31,7 @@ import cv2
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent.parent
+ROOT = HERE.parent.parent.parent
 sys.path.insert(0, str(ROOT))
 from detect import crop_cells  # noqa: E402
 

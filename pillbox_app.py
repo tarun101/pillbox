@@ -384,7 +384,11 @@ GALLERY_PAGE_TOP = """\
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
           gap:12px; padding:12px; }
   .card { background:#1c1c1c; border-radius:8px; overflow:hidden; }
-  .card img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; }
+  /* Camera is mounted upside down; rotate the thumbnail for display only.
+     The stored file keeps its orientation so the detectors' reference-photo
+     calibration (crop_cells) still matches. */
+  .card img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block;
+              transform:rotate(180deg); }
   .meta { padding:8px 10px; font-size:13px; }
   .meta .row { display:flex; justify-content:space-between; margin-top:6px; }
   .meta a { color:#8bf; text-decoration:none; }

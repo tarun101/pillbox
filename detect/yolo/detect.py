@@ -7,11 +7,10 @@ classes, ``Empty`` / ``Full``. It is run on each of the 21 warped cell crops
 7x3 grid, crop each cell), so this behaves like a per-cell presence detector.
 
 It runs on **onnxruntime** — the same lightweight runtime the CNN uses — so
-no PyTorch / ultralytics is needed at inference time. `best.onnx` was trained
-elsewhere and brought into the repo (its source `best.pt` is kept alongside).
-To replace it, drop in a new ONNX classify model, or re-export a `.pt` with
-``yolo export model=best.pt format=onnx imgsz=640``. (The from-scratch
-training scripts under `experiments/` are a separate, older exploration.)
+no PyTorch / ultralytics is needed at inference time. `best.onnx` (and its
+`best.pt` source, kept alongside) were trained by Dylan P and brought into the
+repo. To replace it, drop in a new ONNX classify model, or re-export a `.pt`
+with ``yolo export model=best.pt format=onnx imgsz=640``.
 
 Usage:
     python3 detect/yolo/detect.py PHOTO.jpg --out out.jpg

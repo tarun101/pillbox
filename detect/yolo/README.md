@@ -4,14 +4,16 @@ The app's third per-cell detector, next to DoG and the CNN. Despite the name,
 the shipped model is a YOLO **classification** net — not an object detector:
 two classes, `Empty` / `Full`, run once per compartment.
 
+**Model credit:** `best.onnx` (and its `best.pt` source) were **trained by
+Dylan P** and brought into this repo.
+
 ## What ships
 
 | file | role |
 |---|---|
-| **`best.onnx`** | the runtime model — **trained elsewhere and brought into this repo** |
-| `best.pt` | the source the ONNX was exported from; kept for provenance / re-export (not loaded at runtime) |
+| **`best.onnx`** | the runtime model — the ONNX export used at inference |
+| `best.pt` | the source it was exported from; kept for provenance / re-export (not loaded at runtime) |
 | `detect.py` | loads `best.onnx` with **onnxruntime** and exposes `analyze()` |
-| `experiments/` | earlier from-scratch exploration — not shipped (see below) |
 
 `detect.py` runs on **onnxruntime**, the same lightweight runtime the CNN
 uses, so **no PyTorch / ultralytics is needed on the Pi**. `analyze(photo)`
@@ -43,13 +45,3 @@ From a `.pt`:
 ```bash
 yolo export model=best.pt format=onnx imgsz=640
 ```
-
-## `experiments/` — earlier from-scratch exploration (not shipped)
-
-Before the trained classifier above arrived, this folder explored building a
-YOLO **object detector** from the repo's own photos — auto pseudo-labels, a
-hand-labelled set, and a grid-classification set. Those models trained poorly
-(telling a pill from an empty tinted lid needs the empty-box reference, which a
-plain RGB YOLO never sees). The scripts, datasets recipes, and the full
-write-up live in [`experiments/`](experiments/README.md) for reference; none of
-it is wired into the app.

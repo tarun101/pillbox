@@ -125,6 +125,24 @@ ANALYZE_MODAL_CSS = """\
   .aloading { padding:34px; text-align:center; color:#aaa; font-size:14px; }
   .aerr { margin:12px 14px; background:#432; color:#fda; padding:12px 16px;
           border-radius:8px; font-size:13px; line-height:1.5; }
+  /* Phones: let the whole 7-day grid fit the screen. table-layout:fixed with
+     width:100% and auto day columns splits the width *equally*, so cells stay
+     uniform instead of shrinking to unequal rounded widths (which looked like
+     pill/empty cells being different sizes). */
+  @media (max-width: 480px) {
+    #amodal { padding:12px 4px; align-items:stretch; }
+    .abox { border-radius:10px; }
+    .ahead { padding:12px 14px; }
+    .ahead b { font-size:14px; }
+    #abody { padding:4px 2px 14px; }
+    #abody .method h3 { margin:12px 10px 2px; font-size:14px; gap:6px; }
+    #abody .wrap { padding:0 6px 6px; }
+    #abody table { width:100%; border-spacing:4px; }
+    #abody th, #abody td { width:auto; }
+    #abody th:first-child, #abody td:first-child { width:30px; }
+    #abody th { font-size:10px; padding:2px 1px; }
+    #abody td { height:40px; font-size:10px; }
+  }
 """
 
 ANALYZE_MODAL = """\

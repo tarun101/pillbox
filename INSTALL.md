@@ -84,6 +84,23 @@ seconds. You can also trigger it by hand from the repo's **Actions** tab
 ("Deploy to Pi" → *Run workflow*). The manual `git pull && systemctl --user
 restart pillbox` still works any time as a fallback.
 
+### Lightweight alternative: poll-based auto-deploy (no runner)
+
+If the self-hosted runner is inconvenient (the runner tarball can be a slow
+download on a Pi), `deploy/poll-deploy.sh` does the same job from cron with no
+extra software — it checks `origin/main` every couple of minutes and redeploys
+only when it has moved:
+
+```
+sudo loginctl enable-linger $USER   # so the service restarts without a login session
+( crontab -l 2>/dev/null; \
+  echo "*/2 * * * * $HOME/pillbox/deploy/poll-deploy.sh >> $HOME/deploy-pillbox.log 2>&1" ) | crontab -
+```
+
+Deploys land within ~2 minutes of a merge; each one is logged to
+`~/deploy-pillbox.log`. Use either this or the GitHub Actions runner above, not
+both.
+
 ## Public access via Cloudflare Tunnel
 
 The app is reachable from anywhere at **https://pi.uprobotics.tech** through a

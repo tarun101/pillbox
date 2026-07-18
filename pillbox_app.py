@@ -144,6 +144,14 @@ ANALYZE_MODAL_CSS = """\
     #abody th { font-size:10px; padding:1px; }
     #abody td { height:31px; font-size:10px; }
   }
+  /* Wider screens: lay the detector grids side by side (wrapping) so all
+     three fit without scrolling and the horizontal space isn't wasted. */
+  @media (min-width: 700px) {
+    .abox { max-width:1040px; }
+    #abody { display:flex; flex-wrap:wrap; justify-content:center;
+             align-items:flex-start; gap:0 14px; padding-bottom:12px; }
+    #abody .method { flex:0 1 auto; }
+  }
 """
 
 ANALYZE_MODAL = """\

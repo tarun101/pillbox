@@ -125,6 +125,33 @@ ANALYZE_MODAL_CSS = """\
   .aloading { padding:34px; text-align:center; color:#aaa; font-size:14px; }
   .aerr { margin:12px 14px; background:#432; color:#fda; padding:12px 16px;
           border-radius:8px; font-size:13px; line-height:1.5; }
+  /* Phones: let the whole 7-day grid fit the screen. table-layout:fixed with
+     width:100% and auto day columns splits the width *equally*, so cells stay
+     uniform instead of shrinking to unequal rounded widths (which looked like
+     pill/empty cells being different sizes). */
+  @media (max-width: 480px) {
+    #amodal { padding:6px 4px; }
+    .abox { border-radius:10px; }
+    .ahead { padding:8px 12px; }
+    .ahead b { font-size:14px; }
+    #abody { padding:2px 2px 6px; }
+    #abody .method { margin:0; }
+    #abody .method h3 { margin:6px 10px 1px; font-size:13px; gap:6px; }
+    #abody .wrap { padding:0 6px 3px; }
+    #abody table { width:100%; border-spacing:3px; }
+    #abody th, #abody td { width:auto; }
+    #abody th:first-child, #abody td:first-child { width:28px; }
+    #abody th { font-size:10px; padding:1px; }
+    #abody td { height:31px; font-size:10px; }
+  }
+  /* Wider screens: lay the detector grids side by side (wrapping) so all
+     three fit without scrolling and the horizontal space isn't wasted. */
+  @media (min-width: 700px) {
+    .abox { max-width:1040px; }
+    #abody { display:flex; flex-wrap:wrap; justify-content:center;
+             align-items:flex-start; gap:0 14px; padding-bottom:12px; }
+    #abody .method { flex:0 1 auto; }
+  }
 """
 
 ANALYZE_MODAL = """\

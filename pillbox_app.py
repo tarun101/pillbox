@@ -633,7 +633,7 @@ class _Meter:
         return self
 
     def _poll(self):
-        while not self._stop.wait(0.15):
+        while not self._stop.wait(0.25):
             w = _read_power_watts()
             if w is not None:
                 self.samples.append(w)

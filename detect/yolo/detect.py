@@ -1,119 +1,105 @@
 #!/usr/bin/env python3
-"""Draw a box around every compartment and label it pill / no-pill.
+"""Classify every compartment pill / no-pill with the trained YOLO model.
 
-Locates the box, warps to the canonical 7x3 grid, decides pill/no-pill for
-each of the 21 compartments, draws each cell green (pill) or grey (no pill),
-and prints the grid.
+The shipped model (`best.onnx`) is a YOLO *classification* net with two
+classes, ``Empty`` / ``Full``. It is run on each of the 21 warped cell crops
+(same front-end as the CNN pipeline: locate the box, warp to the canonical
+7x3 grid, crop each cell), so this behaves like a per-cell presence detector.
 
-Two backends:
-  * default — a trained YOLO grid-classification model (`build_gridset.py`).
-    Honest heads-up: this from-scratch model classifies poorly (it collapses
-    to "no_pill"); telling a pill from an empty tinted lid needs the
-    empty-box reference, which plain RGB YOLO never sees. See the README.
-  * --classifier — the shipped 6-channel classifier (../pipeline.py), which
-    DOES compare against the empty reference and is ~88% accurate. Same
-    visual, trustworthy verdicts. Recommended.
-
-It also still handles the single-class pill detectors
-(`make_dataset.py` / `build_handset.py`): those draw only the pill cells.
+It runs on **onnxruntime** — the same lightweight runtime the CNN uses — so
+no PyTorch / ultralytics is needed at inference time. The weights ship as
+ONNX; retrain with detect/yolo/train.py and re-export with
+``yolo export model=best.pt format=onnx imgsz=640`` to refresh them.
 
 Usage:
-    python3 detect/yolo/detect.py PHOTO.jpg --classifier --out out.jpg
-    python3 detect/yolo/detect.py PHOTO.jpg [--weights ...] [--conf 0.25]
+    python3 detect/yolo/detect.py PHOTO.jpg --out out.jpg
+    python3 detect/yolo/detect.py PHOTO.jpg --classifier   # use the CNN instead
 """
 import argparse
+import ast
 import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from detect import crop_cells  # noqa: E402
 
-# Prefer freshly trained weights under dataset/ if present; otherwise fall back
-# to the copy shipped in the repo next to this module, so YOLO works out of the
-# box (dataset/ is gitignored training output and won't exist on a fresh clone).
-_TRAINED_WEIGHTS = Path(__file__).parent.parent.parent / \
-    "dataset/yolo_grid/runs/pill/weights/best.pt"
-_SHIPPED_WEIGHTS = Path(__file__).parent / "best.pt"
-DEFAULT_WEIGHTS = _TRAINED_WEIGHTS if _TRAINED_WEIGHTS.is_file() else _SHIPPED_WEIGHTS
+# Runtime weights: the ONNX classifier shipped next to this module. (train.py
+# writes a .pt under the gitignored dataset/; export it to ONNX to use it here.)
+DEFAULT_WEIGHTS = Path(__file__).parent / "best.onnx"
 
 GREEN, GREY = (0, 200, 0), (150, 150, 150)
 
 
 def is_pill_class(name):
+    """True for the class that means "a pill is present" (Full / pill)."""
     n = name.lower()
-    return "pill" in n and "no" not in n and "empty" not in n
-
-
-def verdict_from_classifier(photo):
-    """(is_pill, prob) per (row, col) from the shipped 6-channel classifier."""
-    from detect import pipeline
-    result = pipeline.analyze(photo)   # {DAY_SLOT: {"pill": bool, "prob": float}}
-    v = {}
-    for r, slot in enumerate(crop_cells.SLOTS):
-        for c, day in enumerate(crop_cells.DAYS):
-            cell = result[f"{day}_{slot}"]
-            v[(r, c)] = (cell["pill"], cell["prob"])
-    return v, True   # multiclass=True -> draw every compartment
-
-
-def verdict_from_yolo(grid, weights, conf):
-    from ultralytics import YOLO
-    model = YOLO(weights)
-    names = model.names
-    multiclass = any(not is_pill_class(n) for n in names.values())
-    res = model.predict(grid, conf=conf, verbose=False)[0]
-    CW, CH = crop_cells.CELL_W, crop_cells.CELL_H
-    v = {}
-    for box in res.boxes:
-        x0, y0, x1, y1 = box.xyxy[0].tolist()
-        bconf = float(box.conf[0])
-        pill = is_pill_class(names[int(box.cls[0])])
-        col, row = int((x0 + x1) / 2 // CW), int((y0 + y1) / 2 // CH)
-        if not (0 <= col < 7 and 0 <= row < 3):
-            continue
-        if multiclass:
-            if (row, col) not in v or bconf > v[(row, col)][1]:
-                v[(row, col)] = (pill, bconf)
-        elif pill:
-            v[(row, col)] = (True, max(bconf, v.get((row, col), (0, 0))[1]))
-    return v, multiclass
+    if "empty" in n or "no" in n:
+        return False
+    return "full" in n or "pill" in n
 
 
 class AnalysisError(Exception):
     """Photo could not be analysed; str(exc) explains why."""
 
 
-_model = None  # lazy YOLO singleton, loaded on first analyze()
+# Lazy onnxruntime singleton, loaded on first use.
+_session = None
+_names = None       # {idx: class_name}
+_pill_idx = None    # index of the "pill present" class
+_imgsz = 640        # model's square input size, read from the graph
 
 
-def _load_model(weights=DEFAULT_WEIGHTS):
-    global _model
-    if _model is not None:
-        return _model
+def _load_session(weights=DEFAULT_WEIGHTS):
+    """Load the ONNX classifier once and cache it with its class metadata."""
+    global _session, _names, _pill_idx, _imgsz
+    if _session is not None:
+        return _session
     try:
-        from ultralytics import YOLO
+        import onnxruntime
     except ImportError:
         raise AnalysisError(
-            "ultralytics is not installed — run: pip install ultralytics")
+            "onnxruntime is not installed — run: pip install onnxruntime")
     if not Path(weights).is_file():
         raise AnalysisError(
-            f"YOLO weights not found at {weights} — a trained best.pt ships at "
-            "detect/yolo/best.pt, or train your own with detect/yolo/train.py")
-    _model = YOLO(str(weights))
-    return _model
+            f"YOLO weights not found at {weights} — a trained best.onnx ships "
+            "at detect/yolo/best.onnx; export your own with "
+            "'yolo export model=best.pt format=onnx imgsz=640'")
+    _session = onnxruntime.InferenceSession(
+        str(weights), providers=["CPUExecutionProvider"])
+    meta = _session.get_modelmeta().custom_metadata_map
+    _names = ast.literal_eval(meta["names"]) if "names" in meta else {0: "Empty", 1: "Full"}
+    _pill_idx = next((i for i, n in _names.items() if is_pill_class(n)), max(_names))
+    shape = _session.get_inputs()[0].shape  # [1, 3, H, W]
+    if isinstance(shape[-1], int):
+        _imgsz = shape[-1]
+    return _session
 
 
-def analyze(photo_path, conf=0.25):
-    """Analyse one photo with the trained YOLO pill detector.
+def _classify(crop):
+    """Return the softmax [P(class0), P(class1), ...] for one cell crop.
 
-    Locates and warps the box (same front-end as the CNN pipeline), runs
-    YOLO on the grid, and marks a cell as "pill" if any detection's centre
-    falls inside it (presence, not count). Returns
-    {DAY_SLOT: {"pill": bool, "conf": float}}.
+    Replicates ultralytics' classify transform: resize the shorter edge to
+    the model size (bilinear), centre-crop to a square, scale to [0,1], RGB,
+    CHW. The YOLO classify head already applies softmax, so the ONNX output
+    is a probability vector.
     """
-    model = _load_model()
+    h, w = crop.shape[:2]
+    scale = _imgsz / min(h, w)
+    r = cv2.resize(crop, (round(w * scale), round(h * scale)),
+                   interpolation=cv2.INTER_LINEAR)
+    top, left = (r.shape[0] - _imgsz) // 2, (r.shape[1] - _imgsz) // 2
+    sq = r[top:top + _imgsz, left:left + _imgsz]
+    blob = cv2.cvtColor(sq, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    blob = blob.transpose(2, 0, 1)[None]
+    out = _session.run(None, {_session.get_inputs()[0].name: blob})[0]
+    return out[0]
+
+
+def _grid_from_photo(photo_path):
+    """Locate the box and warp it to the canonical 7x3 grid, or raise."""
     img = cv2.imread(str(photo_path))
     if img is None:
         raise AnalysisError(f"cannot read image {photo_path}")
@@ -128,31 +114,62 @@ def analyze(photo_path, conf=0.25):
         raise AnalysisError(
             f"pillbox not found in photo (anchor confidence {conf_str}) — "
             "is the box in its usual spot?")
-    grid = crop_cells.warp_grid(img, quad)
-    res = model.predict(grid, conf=conf, verbose=False)[0]
+    return crop_cells.warp_grid(img, quad)
 
+
+def analyze(photo_path):
+    """Analyse one photo with the trained YOLO Empty/Full classifier.
+
+    Locates and warps the box (same front-end as the CNN pipeline), then
+    classifies each of the 21 cell crops. Returns
+    {DAY_SLOT: {"pill": bool, "conf": float}}, where conf is P(Full).
+    """
+    _load_session()
+    grid = _grid_from_photo(photo_path)
     CW, CH = crop_cells.CELL_W, crop_cells.CELL_H
-    out = {f"{day}_{slot}": {"pill": False, "conf": 0.0}
-           for slot in crop_cells.SLOTS for day in crop_cells.DAYS}
-    for box in res.boxes:
-        x0, y0, x1, y1 = box.xyxy[0].tolist()
-        c = float(box.conf[0])
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        col, row = int(cx // CW), int(cy // CH)
-        if 0 <= col < 7 and 0 <= row < 3:
-            key = f"{crop_cells.DAYS[col]}_{crop_cells.SLOTS[row]}"
-            out[key]["pill"] = True
-            out[key]["conf"] = max(out[key]["conf"], round(c, 3))
+    out = {}
+    for r, slot in enumerate(crop_cells.SLOTS):
+        for c, day in enumerate(crop_cells.DAYS):
+            crop = grid[r * CH:(r + 1) * CH, c * CW:(c + 1) * CW]
+            probs = _classify(crop)
+            out[f"{day}_{slot}"] = {
+                "pill": bool(int(probs.argmax()) == _pill_idx),
+                "conf": round(float(probs[_pill_idx]), 3),
+            }
     return out
+
+
+def verdict_from_classifier(photo):
+    """(is_pill, prob) per (row, col) from the shipped 6-channel CNN."""
+    from detect import pipeline
+    result = pipeline.analyze(photo)   # {DAY_SLOT: {"pill": bool, "prob": float}}
+    v = {}
+    for r, slot in enumerate(crop_cells.SLOTS):
+        for c, day in enumerate(crop_cells.DAYS):
+            cell = result[f"{day}_{slot}"]
+            v[(r, c)] = (cell["pill"], cell["prob"])
+    return v
+
+
+def verdict_from_yolo(grid, weights=DEFAULT_WEIGHTS):
+    """(is_pill, prob) per (row, col) from the YOLO Empty/Full classifier."""
+    _load_session(weights)
+    CW, CH = crop_cells.CELL_W, crop_cells.CELL_H
+    v = {}
+    for r in range(3):
+        for c in range(7):
+            crop = grid[r * CH:(r + 1) * CH, c * CW:(c + 1) * CW]
+            probs = _classify(crop)
+            v[(r, c)] = (int(probs.argmax()) == _pill_idx, float(probs[_pill_idx]))
+    return v
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("photo")
     ap.add_argument("--classifier", action="store_true",
-                    help="use the shipped classifier for verdicts (accurate)")
+                    help="use the shipped 6-channel CNN for verdicts instead of YOLO")
     ap.add_argument("--weights", default=str(DEFAULT_WEIGHTS))
-    ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--out", default="yolo_detect.jpg")
     args = ap.parse_args()
 
@@ -167,17 +184,15 @@ def main():
     grid = crop_cells.warp_grid(img, quad)
 
     if args.classifier:
-        verdict, multiclass = verdict_from_classifier(args.photo)
+        verdict = verdict_from_classifier(args.photo)
     else:
-        verdict, multiclass = verdict_from_yolo(grid, args.weights, args.conf)
+        verdict = verdict_from_yolo(grid, args.weights)
 
     CW, CH = crop_cells.CELL_W, crop_cells.CELL_H
     vis = grid.copy()
     for r in range(3):
         for c in range(7):
             is_pill, conf = verdict.get((r, c), (False, 0.0))
-            if not multiclass and not is_pill:
-                continue
             color = GREEN if is_pill else GREY
             x0, y0 = c * CW, r * CH
             cv2.rectangle(vis, (x0 + 4, y0 + 4), (x0 + CW - 4, y0 + CH - 4), color, 4)
@@ -188,7 +203,7 @@ def main():
 
     npill = sum(1 for v in verdict.values() if v[0])
     print(f"{npill}/21 compartments classified pill "
-          f"({'classifier' if args.classifier else 'YOLO'})")
+          f"({'CNN' if args.classifier else 'YOLO'})")
     for r, slot in enumerate(crop_cells.SLOTS):
         row = " ".join(f"{day}:{'#' if verdict.get((r, c), (False,))[0] else '.'}"
                        for c, day in enumerate(crop_cells.DAYS))

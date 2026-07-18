@@ -1,11 +1,18 @@
 # YOLO pill detector (experiment)
 
-A "for fun" alternative to the shipped classifier (`../`): instead of asking
-per cell *is there a pill?*, this trains a real **YOLO object detector** that
-draws a box around each pill it sees. It is **not** wired into the app and is
-not needed on the Pi — the classifier remains the production path (see the
-[detection README](../README.md) for why detection is the heavier tool for a
-presence/absence question).
+A "for fun" alternative to the shipped 6-channel classifier (`../`): instead of
+asking per cell *is there a pill?* with an empty-box reference, this explores a
+real **YOLO object detector** that draws a box around each pill it sees. The
+object-detector experiments below are **not** wired into the app.
+
+**What ships and runs in the app:** a trained YOLO *classification* model
+(`best.onnx`, classes `Empty` / `Full`) that is run per cell — locate the box,
+warp to the 7x3 grid, classify each of the 21 crops. `detect.py` loads it with
+**onnxruntime** (the same runtime the CNN uses — no PyTorch/ultralytics on the
+Pi) and exposes `analyze()`, which the status and gallery "Analyze" views call
+as the third detector. The weights ship as ONNX; `best.pt` is kept as the
+source — re-export after retraining with
+`yolo export model=best.pt format=onnx imgsz=640`.
 
 ## Three datasets
 

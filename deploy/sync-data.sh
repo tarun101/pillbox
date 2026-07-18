@@ -43,6 +43,12 @@ if os.path.exists(src):
     json.dump(merged, open(dst, "w"), indent=1, sort_keys=True)
 PY
 
+# File any newly-synced photos into the train/valid/test splits (append-only;
+# already-assigned photos — the test set especially — are never moved).
+if [ -f "$HOME/pillbox/detect/make_splits.py" ]; then
+    python3 "$HOME/pillbox/detect/make_splits.py" --data "$DATA_REPO" || true
+fi
+
 git add -A
 if ! git diff --cached --quiet; then
     git commit -qm "sync from pi $(date '+%Y-%m-%d %H:%M')"

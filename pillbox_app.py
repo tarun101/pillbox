@@ -101,6 +101,8 @@ ANALYZE_MODAL_CSS = """\
   .ahead { display:flex; justify-content:space-between; align-items:center;
            padding:14px 18px; border-bottom:1px solid #2a2a2a; }
   .ahead b { font-size:15px; word-break:break-all; }
+  .abase { margin-left:auto; margin-right:12px; color:#6b8; font-size:12px;
+           font-weight:600; white-space:nowrap; }
   .ahead button { background:none; border:none; color:#aaa; font-size:22px;
                   cursor:pointer; line-height:1; padding:0 4px; }
   #abody { padding:6px 6px 18px; }
@@ -168,7 +170,7 @@ ANALYZE_MODAL_CSS = """\
 ANALYZE_MODAL = """\
 <div id="amodal" onclick="closeAnalyze(event)">
   <div class="abox">
-    <div class="ahead"><b id="atitle"></b><button onclick="closeAnalyze(true)" title="Close">&times;</button></div>
+    <div class="ahead"><b id="atitle"></b><span id="abase" class="abase"></span><button onclick="closeAnalyze(true)" title="Close">&times;</button></div>
     <div id="abody"></div>
   </div>
 </div>
@@ -208,7 +210,10 @@ function renderGrid(results, metric) {
 function fmtPerf(perf) {
   if (!perf) return '';
   const parts = [perf.elapsed_s.toFixed(2) + ' s'];
-  if (perf.avg_watts != null) {
+  if (perf.net_watts != null) {  // draw above the idle baseline
+    parts.push('+' + perf.net_watts.toFixed(1) + ' W');
+    parts.push(perf.net_energy_j.toFixed(1) + ' J');
+  } else if (perf.avg_watts != null) {
     parts.push(perf.avg_watts.toFixed(1) + ' W avg');
     if (perf.energy_j != null) parts.push(perf.energy_j.toFixed(1) + ' J');
   }
@@ -244,7 +249,9 @@ function closeAnalyze(e) {
 }
 async function analyze(name, btn) {
   const body = document.getElementById('abody');
+  const base = document.getElementById('abase');
   document.getElementById('atitle').textContent = name;
+  base.textContent = '';
   body.innerHTML = '<div class="aloading">Running DoG, CNN and YOLO on ' +
     esc(name) + '&hellip;<br>this can take a moment on the Pi.</div>';
   openAnalyze();
@@ -255,6 +262,9 @@ async function analyze(name, btn) {
     if (!r.ok) {
       body.innerHTML = '<div class="aerr">⚠ ' + esc(data.error || 'Analysis failed.') + '</div>';
     } else {
+      // Power figures below are each detector's draw above this idle baseline.
+      if (data.baseline_watts != null)
+        base.textContent = 'idle ' + data.baseline_watts.toFixed(1) + ' W';
       body.innerHTML = renderAnalysis(data);
     }
   } catch (e) {
@@ -460,11 +470,18 @@ def _render_grid(results, metric):
 
 
 def _fmt_perf(perf):
-    """Compact 'time · power · energy' label for a detector, '' if none."""
+    """Compact 'time · power · energy' label for a detector, '' if none.
+
+    Uses the detector's draw above the idle baseline (+N W) when the baseline
+    was measured; otherwise falls back to whole-board average watts.
+    """
     if not perf:
         return ""
     parts = [f'{perf["elapsed_s"]:.2f} s']
-    if "avg_watts" in perf:
+    if "net_watts" in perf:
+        parts.append(f'+{perf["net_watts"]:.1f} W')
+        parts.append(f'{perf["net_energy_j"]:.1f} J')
+    elif "avg_watts" in perf:
         parts.append(f'{perf["avg_watts"]:.1f} W avg')
         if "energy_j" in perf:
             parts.append(f'{perf["energy_j"]:.1f} J')
@@ -489,9 +506,13 @@ def render_status_page(photo, analysis, error=None):
         parts.append('<div class="empty-msg">No photos yet — go take some.'
                      '</div></body></html>')
         return "".join(parts)
+    baseline = next((m["perf"].get("baseline_watts") for m in analysis.values()
+                     if m.get("perf")), None)
+    base_html = (f' &middot; idle baseline {baseline:.1f} W'
+                 if baseline is not None else "")
     parts.append(
         f'<div class="sub">Detector comparison &middot; from '
-        f'<a href="/photos/{photo}" target="_blank">{photo}</a></div>'
+        f'<a href="/photos/{photo}" target="_blank">{photo}</a>{base_html}</div>'
     )
     for m in analysis.values():
         perf = _fmt_perf(m.get("perf"))
@@ -607,6 +628,23 @@ def _read_power_watts():
     return round(power, 2) if power > 0 else None
 
 
+def _measure_baseline(n=5, interval=0.08):
+    """Average idle board power (W) from a few PMIC samples, or None.
+
+    Taken just before the detector loop so each detector's draw can be
+    reported net of the Pi's resting draw (idle SoC + camera + anything else
+    running). None when the PMIC isn't readable (e.g. a Pi 4).
+    """
+    samples = []
+    for i in range(n):
+        w = _read_power_watts()
+        if w is not None:
+            samples.append(w)
+        if i < n - 1:
+            time.sleep(interval)
+    return round(sum(samples) / len(samples), 2) if samples else None
+
+
 class _Meter:
     """Times a block and samples board power (Pi 5 PMIC) while it runs.
 
@@ -616,7 +654,8 @@ class _Meter:
     photo analysed after start.
     """
 
-    def __init__(self):
+    def __init__(self, baseline=None):
+        self.baseline = baseline  # idle board watts, to report draw net of it
         self.samples = []
         self.elapsed = 0.0
         self._stop = None
@@ -653,6 +692,12 @@ class _Meter:
             d["avg_watts"] = round(avg, 2)
             d["peak_watts"] = round(max(self.samples), 2)
             d["energy_j"] = round(avg * self.elapsed, 2)
+            if self.baseline is not None:
+                # draw attributable to this detector, above the idle board
+                net = max(0.0, avg - self.baseline)
+                d["baseline_watts"] = self.baseline
+                d["net_watts"] = round(net, 2)
+                d["net_energy_j"] = round(net * self.elapsed, 2)
         return d
 
 
@@ -675,7 +720,8 @@ def analyze_photo(photo):
 
     Returns {method_key: {"label", "desc", "metric", "results", "error",
     "perf"}}. `perf` carries the detector's wall-clock time and, on a Pi 5,
-    its board power draw while it ran.
+    its board power draw while it ran — reported net of an idle baseline
+    sampled just before the detectors run (net_watts / net_energy_j).
     """
     if photo in STATUS_CACHE:
         return STATUS_CACHE[photo]
@@ -685,8 +731,9 @@ def analyze_photo(photo):
     with STATUS_LOCK:
         if photo not in STATUS_CACHE:  # may have been computed while waiting
             combined = {}
+            baseline = _measure_baseline()  # idle draw, before any detector runs
             for key, label, desc, module_name, metric in DETECTORS:
-                with _Meter() as meter:
+                with _Meter(baseline) as meter:
                     results, error = _run_detector(module_name, photo)
                 combined[key] = {"label": label, "desc": desc, "metric": metric,
                                  "results": results, "error": error,
@@ -704,15 +751,18 @@ def analyze_photo_json(photo):
     detector errored.
     """
     methods = {}
+    baseline = None
     for key, m in analyze_photo(photo).items():
         entry = {"label": m["label"], "desc": m["desc"],
                  "metric": m["metric"], "error": m["error"],
                  "perf": m.get("perf")}
+        if baseline is None and m.get("perf"):
+            baseline = m["perf"].get("baseline_watts")
         if m["results"] is not None:
             entry["results"] = m["results"]
             entry["count"] = sum(1 for r in m["results"].values() if r["pill"])
         methods[key] = entry
-    return {"photo": photo, "methods": methods}
+    return {"photo": photo, "baseline_watts": baseline, "methods": methods}
 
 
 def fmt_bytes(n):

@@ -337,8 +337,21 @@ shutter.onclick = async () => {
   shutter.disabled = false;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 2500);
-  // Kick off the three detectors on the fresh photo and pop the results modal.
-  if (saved && document.getElementById('autoanalyze').checked) analyze(saved);
+  // Auto-analyze: the still capture is the camera's biggest power transient,
+  // and running the detectors while also serving the live preview stacks the
+  // load high enough to brown out a marginal supply. Pause the preview while
+  // the detectors run and give the capture transient a moment to settle.
+  if (saved && document.getElementById('autoanalyze').checked) {
+    const preview = document.querySelector('.stage img');
+    const src = preview.src;
+    preview.removeAttribute('src');   // drop the MJPEG connection
+    try {
+      await new Promise(res => setTimeout(res, 800));  // let the board settle
+      await analyze(saved);
+    } finally {
+      preview.src = src;              // resume the live preview
+    }
+  }
 };
 </script>
 """ + ANALYZE_SCRIPT + ANALYZE_MODAL + """\

@@ -501,7 +501,7 @@ DETECTORS = [
      "trained reference-differencing classifier (pill_classifier.onnx)",
      "detect.pipeline", "prob"),
     ("yolo", "YOLO",
-     "trained YOLO object detector on the warped grid",
+     "trained YOLO Empty/Full classifier, run per cell via onnxruntime",
      "detect.yolo.detect", "conf"),
 ]
 

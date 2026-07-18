@@ -101,6 +101,41 @@ Deploys land within ~2 minutes of a merge; each one is logged to
 `~/deploy-pillbox.log`. Use either this or the GitHub Actions runner above, not
 both.
 
+## Dataset sync (photos + labels → pillbox-data repo)
+
+Training/testing images and ground-truth labels live in a **separate
+`pillbox-data` GitHub repo**, not on the Pi (the gallery can delete photos and
+SD cards die) and not in this app repo (it would bloat it). Layout:
+
+```
+pillbox-data/
+  raw/YYYY-MM-DD/photo_*.jpg     every capture, filed by date
+  references/<set-id>/           empty-box reference sets, versioned
+  labels/labels.json             per-cell ground truth
+  splits/{train,val,test}.txt    split BY SCENE; test frozen, never trained on
+```
+
+Labels come from the app itself: the gallery's **Analyze** modal has a
+"Your labels" review grid (prefilled with the detectors' majority vote,
+disagreements ringed amber) — tap cells to correct, save, and the labels land
+in `~/photos/labels.json` (outside the repo clone, so deploys never wipe
+them).
+
+One-time setup on the Pi:
+
+```
+# create an empty pillbox-data repo on GitHub first, then:
+git clone git@github.com:<you>/pillbox-data ~/pillbox-data
+( crontab -l 2>/dev/null; \
+  echo "17 * * * * $HOME/pillbox/deploy/sync-data.sh >> $HOME/sync-data.log 2>&1" ) | crontab -
+```
+
+`deploy/sync-data.sh` then files new photos under `raw/` and merges the
+reviewed labels into `labels/labels.json` hourly, committing only when
+something changed. Training elsewhere is just: clone both repos, generate
+crops from `pillbox-data/raw/`, and point `detect/train_classifier.py
+--labels` at `pillbox-data/labels/labels.json`.
+
 ## Public access via Cloudflare Tunnel
 
 The app is reachable from anywhere at **https://pi.uprobotics.tech** through a

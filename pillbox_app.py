@@ -42,6 +42,10 @@ from picamera2.outputs import FileOutput
 
 PHOTO_DIR = Path.home() / "photos"
 THUMB_DIR = PHOTO_DIR / ".thumbs"
+# Per-cell ground-truth labels written from the Analyze modal's review UI.
+# Lives in PHOTO_DIR (not the repo clone!) so deploys — which git reset --hard —
+# never wipe it; deploy/sync-data.sh merges it into the pillbox-data repo.
+LABELS_FILE = PHOTO_DIR / "labels.json"
 STREAM_SIZE = (1024, 576)
 STILL_SIZE = (4608, 2592)
 THUMB_MAX = (400, 400)
@@ -101,6 +105,8 @@ ANALYZE_MODAL_CSS = """\
   .ahead { display:flex; justify-content:space-between; align-items:center;
            padding:14px 18px; border-bottom:1px solid #2a2a2a; }
   .ahead b { font-size:15px; word-break:break-all; }
+  .abase { margin-left:auto; margin-right:12px; color:#6b8; font-size:12px;
+           font-weight:600; white-space:nowrap; }
   .ahead button { background:none; border:none; color:#aaa; font-size:22px;
                   cursor:pointer; line-height:1; padding:0 4px; }
   #abody { padding:6px 6px 18px; }
@@ -123,6 +129,16 @@ ANALYZE_MODAL_CSS = """\
               font-size:11px; font-weight:600; }
   #abody td.pill { background:#1d4d1d; color:#8e8; border:1px solid #2a7a2a; }
   #abody td.empty { background:#222; color:#777; border:1px solid #333; }
+  /* Labeler cells: tappable; skip = excluded from training; amber ring =
+     the detectors disagreed on this cell, review it first. */
+  #abody td.lab { cursor:pointer; -webkit-user-select:none; user-select:none; }
+  #abody td.lab.skip { background:#1c1c2a; color:#78a; border:1px dashed #456; }
+  #abody td.lab.hot { box-shadow:inset 0 0 0 2px #c93; }
+  .lsave { display:flex; gap:12px; align-items:center; margin:4px 14px 10px; }
+  .lsave button { background:#243; color:#8e8; border:1px solid #2a7a2a;
+                  border-radius:6px; padding:7px 16px; font-size:13px; cursor:pointer; }
+  .lsave button:disabled { opacity:.5; }
+  .lsave span { color:#999; font-size:12px; }
   .aloading { padding:34px; text-align:center; color:#aaa; font-size:14px; }
   .aerr { margin:12px 14px; background:#432; color:#fda; padding:12px 16px;
           border-radius:8px; font-size:13px; line-height:1.5; }
@@ -168,7 +184,7 @@ ANALYZE_MODAL_CSS = """\
 ANALYZE_MODAL = """\
 <div id="amodal" onclick="closeAnalyze(event)">
   <div class="abox">
-    <div class="ahead"><b id="atitle"></b><button onclick="closeAnalyze(true)" title="Close">&times;</button></div>
+    <div class="ahead"><b id="atitle"></b><span id="abase" class="abase"></span><button onclick="closeAnalyze(true)" title="Close">&times;</button></div>
     <div id="abody"></div>
   </div>
 </div>
@@ -208,7 +224,10 @@ function renderGrid(results, metric) {
 function fmtPerf(perf) {
   if (!perf) return '';
   const parts = [perf.elapsed_s.toFixed(2) + ' s'];
-  if (perf.avg_watts != null) {
+  if (perf.net_watts != null) {  // draw above the idle baseline
+    parts.push('+' + perf.net_watts.toFixed(1) + ' W');
+    parts.push(perf.net_energy_j.toFixed(1) + ' J');
+  } else if (perf.avg_watts != null) {
     parts.push(perf.avg_watts.toFixed(1) + ' W avg');
     if (perf.energy_j != null) parts.push(perf.energy_j.toFixed(1) + ' J');
   }
@@ -235,6 +254,88 @@ function renderAnalysis(data) {
   }
   return h;
 }
+// --- Ground-truth labeler: review the verdicts above and save per-cell labels
+// for training. Cells cycle pill -> empty -> skip (skip = too ambiguous to
+// train on). An amber ring marks cells where the detectors disagree — the most
+// valuable ones to review. Saved labels land in ~/photos/labels.json on the
+// Pi and are synced to the pillbox-data repo by deploy/sync-data.sh.
+function labelerInit(data, saved) {
+  const votes = {};
+  for (const key of Object.keys(data.methods)) {
+    const m = data.methods[key];
+    if (!m.results) continue;
+    for (const cell of Object.keys(m.results))
+      (votes[cell] = votes[cell] || []).push(m.results[cell].pill);
+  }
+  const init = {}, hot = {};
+  for (const d of A_DAYS) for (const s of A_SLOTS) {
+    const cell = d + '_' + s;
+    const v = votes[cell] || [];
+    const pills = v.filter(Boolean).length;
+    hot[cell] = v.length > 1 && pills > 0 && pills < v.length;
+    init[cell] = saved[cell] ||
+      (v.length ? (pills * 2 >= v.length ? 'pill' : 'empty') : 'skip');
+  }
+  return {init, hot};
+}
+function labText(v) { return v === 'pill' ? 'pill' : v === 'empty' ? '—' : 'skip'; }
+function renderLabeler(data, saved) {
+  const {init, hot} = labelerInit(data, saved);
+  const nHot = Object.values(hot).filter(Boolean).length;
+  const nSaved = Object.keys(saved).length;
+  let h = '<div class="method"><h3>Your labels <span class="desc">tap to cycle ' +
+    'pill / empty / skip' + (nHot ? ' · amber ring = detectors disagree' : '') +
+    '</span></h3>';
+  h += '<div class="wrap"><table><tr><th></th>';
+  for (const d of A_DAYS) h += '<th>' + d + '</th>';
+  h += '</tr>';
+  for (const s of A_SLOTS) {
+    h += '<tr><th>' + s + '</th>';
+    for (const d of A_DAYS) {
+      const cell = d + '_' + s;
+      h += '<td class="lab ' + init[cell] + (hot[cell] ? ' hot' : '') +
+           '" data-cell="' + cell + '" onclick="cycleLabel(this)">' +
+           labText(init[cell]) + '</td>';
+    }
+    h += '</tr>';
+  }
+  h += '</table></div>';
+  h += '<div class="lsave"><button id="lsavebtn" onclick="saveLabels()">Save labels</button>' +
+       '<span id="lstat">' + (nSaved ? nSaved + ' previously saved' : '') + '</span></div></div>';
+  return h;
+}
+function cycleLabel(td) {
+  const next = {pill: 'empty', empty: 'skip', skip: 'pill'};
+  const cur = td.classList.contains('pill') ? 'pill'
+            : td.classList.contains('empty') ? 'empty' : 'skip';
+  td.classList.remove(cur);
+  td.classList.add(next[cur]);
+  td.textContent = labText(next[cur]);
+}
+async function saveLabels() {
+  const name = document.getElementById('atitle').textContent;
+  const labels = {};  // skip -> null so an earlier saved label gets removed
+  document.querySelectorAll('#abody td.lab').forEach(td => {
+    labels[td.dataset.cell] = td.classList.contains('pill') ? 'pill'
+      : td.classList.contains('empty') ? 'empty' : null;
+  });
+  const btn = document.getElementById('lsavebtn');
+  const stat = document.getElementById('lstat');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/label', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({photo: name, labels}),
+    });
+    const data = await r.json();
+    stat.textContent = r.ok ? data.saved + ' labels saved ✓'
+                            : (data.error || 'Save failed.');
+  } catch (e) {
+    stat.textContent = 'Save failed: ' + e;
+  }
+  btn.disabled = false;
+}
 function openAnalyze() { document.getElementById('amodal').classList.add('show'); }
 function closeAnalyze(e) {
   // Backdrop click closes; clicks inside the box (e.currentTarget !== target) don't.
@@ -244,7 +345,9 @@ function closeAnalyze(e) {
 }
 async function analyze(name, btn) {
   const body = document.getElementById('abody');
+  const base = document.getElementById('abase');
   document.getElementById('atitle').textContent = name;
+  base.textContent = '';
   body.innerHTML = '<div class="aloading">Running DoG, CNN and YOLO on ' +
     esc(name) + '&hellip;<br>this can take a moment on the Pi.</div>';
   openAnalyze();
@@ -255,7 +358,15 @@ async function analyze(name, btn) {
     if (!r.ok) {
       body.innerHTML = '<div class="aerr">⚠ ' + esc(data.error || 'Analysis failed.') + '</div>';
     } else {
-      body.innerHTML = renderAnalysis(data);
+      // Power figures below are each detector's draw above this idle baseline.
+      if (data.baseline_watts != null)
+        base.textContent = 'idle ' + data.baseline_watts.toFixed(1) + ' W';
+      let saved = {};
+      try {  // previously saved ground-truth labels prefill the review grid
+        const lr = await fetch('/labels?photo=' + encodeURIComponent(name));
+        if (lr.ok) saved = (await lr.json()).labels || {};
+      } catch (e) {}
+      body.innerHTML = renderAnalysis(data) + renderLabeler(data, saved);
     }
   } catch (e) {
     body.innerHTML = '<div class="aerr">⚠ ' + esc(e) + '</div>';
@@ -374,7 +485,11 @@ GALLERY_PAGE_TOP = """\
   .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
           gap:12px; padding:12px; }
   .card { background:#1c1c1c; border-radius:8px; overflow:hidden; }
-  .card img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block; }
+  /* Camera is mounted upside down; rotate the thumbnail for display only.
+     The stored file keeps its orientation so the detectors' reference-photo
+     calibration (crop_cells) still matches. */
+  .card img { width:100%; aspect-ratio:16/9; object-fit:cover; display:block;
+              transform:rotate(180deg); }
   .meta { padding:8px 10px; font-size:13px; }
   .meta .row { display:flex; justify-content:space-between; margin-top:6px; }
   .meta a { color:#8bf; text-decoration:none; }
@@ -460,11 +575,18 @@ def _render_grid(results, metric):
 
 
 def _fmt_perf(perf):
-    """Compact 'time · power · energy' label for a detector, '' if none."""
+    """Compact 'time · power · energy' label for a detector, '' if none.
+
+    Uses the detector's draw above the idle baseline (+N W) when the baseline
+    was measured; otherwise falls back to whole-board average watts.
+    """
     if not perf:
         return ""
     parts = [f'{perf["elapsed_s"]:.2f} s']
-    if "avg_watts" in perf:
+    if "net_watts" in perf:
+        parts.append(f'+{perf["net_watts"]:.1f} W')
+        parts.append(f'{perf["net_energy_j"]:.1f} J')
+    elif "avg_watts" in perf:
         parts.append(f'{perf["avg_watts"]:.1f} W avg')
         if "energy_j" in perf:
             parts.append(f'{perf["energy_j"]:.1f} J')
@@ -489,9 +611,13 @@ def render_status_page(photo, analysis, error=None):
         parts.append('<div class="empty-msg">No photos yet — go take some.'
                      '</div></body></html>')
         return "".join(parts)
+    baseline = next((m["perf"].get("baseline_watts") for m in analysis.values()
+                     if m.get("perf")), None)
+    base_html = (f' &middot; idle baseline {baseline:.1f} W'
+                 if baseline is not None else "")
     parts.append(
         f'<div class="sub">Detector comparison &middot; from '
-        f'<a href="/photos/{photo}" target="_blank">{photo}</a></div>'
+        f'<a href="/photos/{photo}" target="_blank">{photo}</a>{base_html}</div>'
     )
     for m in analysis.values():
         perf = _fmt_perf(m.get("perf"))
@@ -565,6 +691,49 @@ def list_photos():
 STATUS_CACHE = {}  # photo name -> {method: {...}} combined detector results
 STATUS_LOCK = Lock()  # one analysis at a time; they're CPU-heavy on the Pi
 
+LABELS_LOCK = Lock()  # serialize read-modify-write of LABELS_FILE
+VALID_CELLS = {f"{d}_{s}" for d in STATUS_DAYS for s in STATUS_SLOTS}
+
+
+def _load_all_labels():
+    """The label store: {"<photo stem>/<DAY_SLOT>": "pill"|"empty"}."""
+    try:
+        return json.loads(LABELS_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def get_photo_labels(photo):
+    """Saved labels for one photo: {DAY_SLOT: "pill"|"empty"}."""
+    stem = Path(photo).stem
+    prefix = f"{stem}/"
+    return {k[len(prefix):]: v for k, v in _load_all_labels().items()
+            if k.startswith(prefix)}
+
+
+def save_photo_labels(photo, labels):
+    """Merge one photo's reviewed labels into the store (atomic rewrite).
+
+    `labels` maps DAY_SLOT -> "pill" | "empty" | None (None deletes — the
+    reviewer marked the cell as too ambiguous to train on). Returns the number
+    of labels now stored for this photo.
+    """
+    stem = Path(photo).stem
+    with LABELS_LOCK:
+        store = _load_all_labels()
+        for cell, val in labels.items():
+            if cell not in VALID_CELLS:
+                continue
+            key = f"{stem}/{cell}"
+            if val in ("pill", "empty"):
+                store[key] = val
+            elif val is None:
+                store.pop(key, None)
+        tmp = LABELS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(store, indent=1, sort_keys=True))
+        tmp.replace(LABELS_FILE)
+        return sum(1 for k in store if k.startswith(f"{stem}/"))
+
 # Detectors compared on /status. Each module exposes analyze(photo_path) ->
 # {DAY_SLOT: {"pill": bool, <metric>: float}} and raises AnalysisError.
 #   (key, label, one-line description, module, per-cell score field)
@@ -607,6 +776,23 @@ def _read_power_watts():
     return round(power, 2) if power > 0 else None
 
 
+def _measure_baseline(n=5, interval=0.08):
+    """Average idle board power (W) from a few PMIC samples, or None.
+
+    Taken just before the detector loop so each detector's draw can be
+    reported net of the Pi's resting draw (idle SoC + camera + anything else
+    running). None when the PMIC isn't readable (e.g. a Pi 4).
+    """
+    samples = []
+    for i in range(n):
+        w = _read_power_watts()
+        if w is not None:
+            samples.append(w)
+        if i < n - 1:
+            time.sleep(interval)
+    return round(sum(samples) / len(samples), 2) if samples else None
+
+
 class _Meter:
     """Times a block and samples board power (Pi 5 PMIC) while it runs.
 
@@ -616,7 +802,8 @@ class _Meter:
     photo analysed after start.
     """
 
-    def __init__(self):
+    def __init__(self, baseline=None):
+        self.baseline = baseline  # idle board watts, to report draw net of it
         self.samples = []
         self.elapsed = 0.0
         self._stop = None
@@ -653,6 +840,12 @@ class _Meter:
             d["avg_watts"] = round(avg, 2)
             d["peak_watts"] = round(max(self.samples), 2)
             d["energy_j"] = round(avg * self.elapsed, 2)
+            if self.baseline is not None:
+                # draw attributable to this detector, above the idle board
+                net = max(0.0, avg - self.baseline)
+                d["baseline_watts"] = self.baseline
+                d["net_watts"] = round(net, 2)
+                d["net_energy_j"] = round(net * self.elapsed, 2)
         return d
 
 
@@ -675,7 +868,8 @@ def analyze_photo(photo):
 
     Returns {method_key: {"label", "desc", "metric", "results", "error",
     "perf"}}. `perf` carries the detector's wall-clock time and, on a Pi 5,
-    its board power draw while it ran.
+    its board power draw while it ran — reported net of an idle baseline
+    sampled just before the detectors run (net_watts / net_energy_j).
     """
     if photo in STATUS_CACHE:
         return STATUS_CACHE[photo]
@@ -685,8 +879,9 @@ def analyze_photo(photo):
     with STATUS_LOCK:
         if photo not in STATUS_CACHE:  # may have been computed while waiting
             combined = {}
+            baseline = _measure_baseline()  # idle draw, before any detector runs
             for key, label, desc, module_name, metric in DETECTORS:
-                with _Meter() as meter:
+                with _Meter(baseline) as meter:
                     results, error = _run_detector(module_name, photo)
                 combined[key] = {"label": label, "desc": desc, "metric": metric,
                                  "results": results, "error": error,
@@ -704,15 +899,18 @@ def analyze_photo_json(photo):
     detector errored.
     """
     methods = {}
+    baseline = None
     for key, m in analyze_photo(photo).items():
         entry = {"label": m["label"], "desc": m["desc"],
                  "metric": m["metric"], "error": m["error"],
                  "perf": m.get("perf")}
+        if baseline is None and m.get("perf"):
+            baseline = m["perf"].get("baseline_watts")
         if m["results"] is not None:
             entry["results"] = m["results"]
             entry["count"] = sum(1 for r in m["results"].values() if r["pill"])
         methods[key] = entry
-    return {"photo": photo, "methods": methods}
+    return {"photo": photo, "baseline_watts": baseline, "methods": methods}
 
 
 def fmt_bytes(n):
@@ -827,6 +1025,13 @@ class Handler(server.BaseHTTPRequestHandler):
                 self.send_json({"error": "Unknown photo."}, status=404)
                 return
             self.send_json(analyze_photo_json(name))
+        elif path == "/labels":
+            q = parse_qs(query)
+            name = (q.get("photo") or [None])[0]
+            if name is None or safe_photo_path(PHOTO_DIR, name) is None:
+                self.send_json({"error": "Unknown photo."}, status=404)
+                return
+            self.send_json({"photo": name, "labels": get_photo_labels(name)})
         elif path == "/stream.mjpg":
             self.stream_mjpeg()
         elif path == "/all.zip":
@@ -869,6 +1074,21 @@ class Handler(server.BaseHTTPRequestHandler):
                 self.send_json({"file": name})
             except Exception as e:  # report capture failures to the page
                 self.send_json({"error": str(e)}, status=500)
+        elif self.path == "/label":
+            length = int(self.headers.get("Content-Length", 0))
+            try:
+                data = json.loads(self.rfile.read(length))
+                name = data["photo"]
+                labels = data["labels"]
+                assert isinstance(labels, dict)
+            except (json.JSONDecodeError, KeyError, AssertionError, TypeError):
+                self.send_error(400)
+                return
+            if safe_photo_path(PHOTO_DIR, name) is None:
+                self.send_json({"error": "Unknown photo."}, status=404)
+                return
+            n = save_photo_labels(name, labels)
+            self.send_json({"photo": name, "saved": n})
         elif self.path == "/delete-many":
             length = int(self.headers.get("Content-Length", 0))
             try:

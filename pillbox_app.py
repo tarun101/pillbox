@@ -7,7 +7,8 @@ One process owns the camera and serves everything on port 8000:
   /gallery     thumbnails of every photo taken; download one, all as zip, delete,
                or run all three detectors on a single photo (the Analyze button)
   /status      which of the 21 pillbox cells contain a pill (latest photo),
-               compared across the DoG, CNN and YOLO detectors
+               compared across the DoG, CNN and YOLO detectors, with each
+               detector's inference time and (on a Pi 5) power draw
   /stream.mjpg the MJPEG feed used by the preview page
 
 Captures are full sensor resolution (4608x2592 on the imx708). The camera has
@@ -19,9 +20,11 @@ Photos land in ~/photos with thumbnails in ~/photos/.thumbs.
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import socketserver
+import subprocess
 import sys
 import tempfile
 import time
@@ -29,7 +32,7 @@ import zipfile
 from datetime import datetime
 from http import server
 from pathlib import Path
-from threading import Condition, Lock
+from threading import Condition, Event, Lock, Thread
 from urllib.parse import parse_qs, unquote
 
 from PIL import Image
@@ -105,6 +108,8 @@ ANALYZE_MODAL_CSS = """\
                       margin:16px 14px 2px; font-size:15px; font-weight:700; }
   #abody .method h3 .count { color:#999; font-size:12px; font-weight:600; }
   #abody .method h3 .desc { color:#777; font-size:11px; font-weight:400; }
+  #abody .method h3 .perf { color:#6b8; font-size:11px; font-weight:600;
+                            margin-left:auto; white-space:nowrap; }
   #abody .wrap { overflow-x:auto; padding:0 10px 6px; }
   /* Fixed layout + border-box keeps every cell exactly the same size regardless
      of its label or 1px border (auto layout let content nudge widths around). */
@@ -162,17 +167,30 @@ function renderGrid(results, metric) {
   }
   return h + '</table></div>';
 }
+function fmtPerf(perf) {
+  if (!perf) return '';
+  const parts = [perf.elapsed_s.toFixed(2) + ' s'];
+  if (perf.avg_watts != null) {
+    parts.push(perf.avg_watts.toFixed(1) + ' W avg');
+    if (perf.energy_j != null) parts.push(perf.energy_j.toFixed(1) + ' J');
+  }
+  return parts.join(' · ');
+}
 function renderAnalysis(data) {
   let h = '';
   for (const key of Object.keys(data.methods)) {
     const m = data.methods[key];
+    const perf = fmtPerf(m.perf);
+    const perfSpan = perf ? ' <span class="perf">' + esc(perf) + '</span>' : '';
     h += '<div class="method">';
     if (m.error) {
-      h += '<h3>' + esc(m.label) + ' <span class="desc">' + esc(m.desc) + '</span></h3>';
+      h += '<h3>' + esc(m.label) + ' <span class="desc">' + esc(m.desc) +
+           '</span>' + perfSpan + '</h3>';
       h += '<div class="aerr">⚠ ' + esc(m.error) + '</div>';
     } else {
       h += '<h3>' + esc(m.label) + ' <span class="count">' + m.count +
-           '/21 cells</span> <span class="desc">' + esc(m.desc) + '</span></h3>';
+           '/21 cells</span> <span class="desc">' + esc(m.desc) + '</span>' +
+           perfSpan + '</h3>';
       h += renderGrid(m.results, m.metric);
     }
     h += '</div>';
@@ -352,6 +370,8 @@ STATUS_PAGE_TOP = """\
                font-size:16px; font-weight:700; }
   .method h2 .count { color:#999; font-size:13px; font-weight:600; }
   .method h2 .desc { color:#777; font-size:12px; font-weight:400; }
+  .method h2 .perf { color:#6b8; font-size:12px; font-weight:600; margin-left:auto;
+                     white-space:nowrap; }
   .wrap { overflow-x:auto; padding:0 12px 20px; }
   table { border-collapse:separate; border-spacing:6px; margin:0 auto; }
   th { color:#999; font-size:12px; font-weight:600; padding:2px 4px; }
@@ -398,11 +418,23 @@ def _render_grid(results, metric):
     return "".join(parts)
 
 
+def _fmt_perf(perf):
+    """Compact 'time · power · energy' label for a detector, '' if none."""
+    if not perf:
+        return ""
+    parts = [f'{perf["elapsed_s"]:.2f} s']
+    if "avg_watts" in perf:
+        parts.append(f'{perf["avg_watts"]:.1f} W avg')
+        if "energy_j" in perf:
+            parts.append(f'{perf["energy_j"]:.1f} J')
+    return " &middot; ".join(parts)
+
+
 def render_status_page(photo, analysis, error=None):
     """Render /status HTML comparing every detector's per-cell results.
 
     `analysis` is the mapping returned by analyze_photo(): method key ->
-    {"label", "desc", "metric", "results", "error"}.
+    {"label", "desc", "metric", "results", "error", "perf"}.
     """
     parts = [STATUS_PAGE_TOP]
     parts.append(
@@ -421,10 +453,12 @@ def render_status_page(photo, analysis, error=None):
         f'<a href="/photos/{photo}" target="_blank">{photo}</a></div>'
     )
     for m in analysis.values():
+        perf = _fmt_perf(m.get("perf"))
+        perf_html = f'<span class="perf">{perf}</span>' if perf else ""
         if m["error"] is not None:
             parts.append(
                 f'<div class="method"><h2>{m["label"]} '
-                f'<span class="desc">{m["desc"]}</span></h2>'
+                f'<span class="desc">{m["desc"]}</span>{perf_html}</h2>'
                 f'<div class="err">&#9888; {m["error"]}</div></div>'
             )
             continue
@@ -433,7 +467,7 @@ def render_status_page(photo, analysis, error=None):
         parts.append(
             f'<div class="method"><h2>{m["label"]} '
             f'<span class="count">{n}/21 cells</span>'
-            f'<span class="desc">{m["desc"]}</span></h2>'
+            f'<span class="desc">{m["desc"]}</span>{perf_html}</h2>'
         )
         parts.append(_render_grid(results, m["metric"]))
         parts.append("</div>")
@@ -506,6 +540,81 @@ DETECTORS = [
 ]
 
 
+def _read_power_watts():
+    """Total board power in watts from the Pi 5 PMIC, or None if unavailable.
+
+    `vcgencmd pmic_read_adc` reports a voltage and a current per rail; the
+    board draw is the sum of V*I across rails. Only Raspberry Pi 5 exposes
+    this — on a Pi 4 (or without permission) the command fails and we return
+    None, so power simply isn't reported.
+    """
+    try:
+        out = subprocess.run(["vcgencmd", "pmic_read_adc"],
+                             capture_output=True, text=True, timeout=2)
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    volts, amps = {}, {}
+    for line in out.stdout.splitlines():
+        # e.g. "VDD_CORE_A current(7)=6.34765A" / "VDD_CORE_V volt(24)=0.72V"
+        m = re.match(r"\s*(\S+)_([AV])\s+\S+=([0-9.]+)[AV]\s*$", line)
+        if not m:
+            continue
+        (amps if m.group(2) == "A" else volts)[m.group(1)] = float(m.group(3))
+    power = sum(v * amps[n] for n, v in volts.items() if n in amps)
+    return round(power, 2) if power > 0 else None
+
+
+class _Meter:
+    """Times a block and samples board power (Pi 5 PMIC) while it runs.
+
+    Used as a context manager around one detector's analyze() call. `.stats`
+    always has elapsed_s; avg/peak watts and energy are added only when the
+    PMIC is readable. Wall time includes any one-time model load on the first
+    photo analysed after start.
+    """
+
+    def __init__(self):
+        self.samples = []
+        self.elapsed = 0.0
+        self._stop = None
+        self._thread = None
+
+    def __enter__(self):
+        first = _read_power_watts()
+        if first is not None:  # PMIC available -> poll it in the background
+            self.samples.append(first)
+            self._stop = Event()
+            self._thread = Thread(target=self._poll, daemon=True)
+            self._thread.start()
+        self._t0 = time.perf_counter()  # start after the one-time PMIC probe
+        return self
+
+    def _poll(self):
+        while not self._stop.wait(0.15):
+            w = _read_power_watts()
+            if w is not None:
+                self.samples.append(w)
+
+    def __exit__(self, *exc):
+        self.elapsed = time.perf_counter() - self._t0
+        if self._stop is not None:
+            self._stop.set()
+            self._thread.join(timeout=1)
+        return False
+
+    @property
+    def stats(self):
+        d = {"elapsed_s": round(self.elapsed, 3)}
+        if self.samples:
+            avg = sum(self.samples) / len(self.samples)
+            d["avg_watts"] = round(avg, 2)
+            d["peak_watts"] = round(max(self.samples), 2)
+            d["energy_j"] = round(avg * self.elapsed, 2)
+        return d
+
+
 def _run_detector(module_name, photo):
     """Run one detector on a photo. Returns (results, error_message)."""
     import importlib
@@ -523,7 +632,9 @@ def _run_detector(module_name, photo):
 def analyze_photo(photo):
     """Run every detector on one photo (cached).
 
-    Returns {method_key: {"label", "desc", "metric", "results", "error"}}.
+    Returns {method_key: {"label", "desc", "metric", "results", "error",
+    "perf"}}. `perf` carries the detector's wall-clock time and, on a Pi 5,
+    its board power draw while it ran.
     """
     if photo in STATUS_CACHE:
         return STATUS_CACHE[photo]
@@ -534,9 +645,11 @@ def analyze_photo(photo):
         if photo not in STATUS_CACHE:  # may have been computed while waiting
             combined = {}
             for key, label, desc, module_name, metric in DETECTORS:
-                results, error = _run_detector(module_name, photo)
+                with _Meter() as meter:
+                    results, error = _run_detector(module_name, photo)
                 combined[key] = {"label": label, "desc": desc, "metric": metric,
-                                 "results": results, "error": error}
+                                 "results": results, "error": error,
+                                 "perf": meter.stats}
             STATUS_CACHE[photo] = combined
     return STATUS_CACHE[photo]
 
@@ -552,7 +665,8 @@ def analyze_photo_json(photo):
     methods = {}
     for key, m in analyze_photo(photo).items():
         entry = {"label": m["label"], "desc": m["desc"],
-                 "metric": m["metric"], "error": m["error"]}
+                 "metric": m["metric"], "error": m["error"],
+                 "perf": m.get("perf")}
         if m["results"] is not None:
             entry["results"] = m["results"]
             entry["count"] = sum(1 for r in m["results"].values() if r["pill"])

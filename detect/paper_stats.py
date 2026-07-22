@@ -464,6 +464,8 @@ def write_figures(out, results, full_keys, de_all, labels, photos, models, args)
     for k, de in de_all.items():
         if k not in labels or labels[k] != "pill":
             continue
+        if k.split("/")[0] not in photos:
+            continue  # only cells actually run this split — keep num/denom aligned
         bi = bin_index(de)
         counts[bi] += 1
         for n in preds_full:

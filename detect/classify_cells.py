@@ -48,7 +48,7 @@ TEXT_DARKNESS = 25    # L* below cell median that counts as printed text
 REF_DILATE = 15       # px of tolerance when cancelling reference structure
 REF_GAIN = 1.3        # overshoot so reference structure fully cancels
 PIXEL_THRESHOLD = 12  # residual DoG energy that counts as "blob"
-AREA_THRESHOLD = 0.008  # fraction of cell area with blobs -> pill
+AREA_THRESHOLD = 0.00719  # fraction of cell area with blobs -> pill
 
 
 def load_cell(path):

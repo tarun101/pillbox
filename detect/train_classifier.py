@@ -31,6 +31,7 @@ import argparse
 import json
 import random
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -71,7 +72,7 @@ def load_dataset(cells_dir, labels):
         img = cv2.resize(cv2.imread(str(p)), (IN_W, IN_H),
                          interpolation=cv2.INTER_AREA)
         refs[p.stem] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    X, y, groups = [], [], []
+    X, y, groups, samp_stems = [], [], [], []
     for key, lab in sorted(labels.items()):
         stem, cell = key.split("/")
         img = cv2.imread(str(cells_dir / stem / f"{cell}.jpg"))
@@ -82,7 +83,8 @@ def load_dataset(cells_dir, labels):
         X.append(np.concatenate([img, refs[cell]], axis=2))  # HxWx6
         y.append(1 if lab == "pill" else 0)
         groups.append(scene_ids[stem])
-    return np.stack(X), np.array(y), np.array(groups)
+        samp_stems.append(stem)
+    return np.stack(X), np.array(y), np.array(groups), np.array(samp_stems)
 
 
 def photometric(rgb):
@@ -144,6 +146,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--val-frac", type=float, default=0.25)
     ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--splits-dir", metavar="DIR",
+                    help="pillbox-data splits/: train on train.txt, validate on "
+                         "valid.txt, and NEVER touch test.txt (held out). Overrides "
+                         "the internal scene-based --val-frac split.")
     args = ap.parse_args()
 
     random.seed(SEED)
@@ -151,17 +157,38 @@ def main():
     torch.manual_seed(SEED)
 
     labels = json.load(open(args.labels))
-    X, y, groups = load_dataset(Path(args.cells), labels)
-    uniq = np.unique(groups)
-    rng = np.random.RandomState(SEED)
-    rng.shuffle(uniq)
-    n_val = max(1, int(round(len(uniq) * args.val_frac)))
-    val_groups = set(uniq[:n_val])
-    val_idx = np.where([g in val_groups for g in groups])[0]
-    tr_idx = np.where([g not in val_groups for g in groups])[0]
-    print(f"{len(X)} samples, {len(uniq)} scenes -> "
-          f"train {len(tr_idx)} / val {len(val_idx)} "
-          f"(val pill share {y[val_idx].mean():.2f})")
+    X, y, groups, stems = load_dataset(Path(args.cells), labels)
+    if args.splits_dir:
+        # Honour the frozen dataset splits so the test set stays untouched.
+        split_of = {}
+        for name in ("train", "valid", "test"):
+            f = Path(args.splits_dir) / f"{name}.txt"
+            if f.is_file():
+                for s in f.read_text().split():
+                    if s.strip():
+                        split_of[s.strip()] = name
+        tr_idx = np.array([i for i, s in enumerate(stems)
+                           if split_of.get(s) == "train"])
+        val_idx = np.array([i for i, s in enumerate(stems)
+                            if split_of.get(s) == "valid"])
+        n_test = sum(1 for s in stems if split_of.get(s) == "test")
+        n_unassigned = sum(1 for s in stems if s not in split_of)
+        print(f"{len(X)} samples via splits/ -> train {len(tr_idx)} / "
+              f"val {len(val_idx)} (held out: {n_test} test, "
+              f"{n_unassigned} unassigned cells excluded)")
+        if len(tr_idx) == 0 or len(val_idx) == 0:
+            sys.exit("error: empty train or valid split — check --splits-dir")
+    else:
+        uniq = np.unique(groups)
+        rng = np.random.RandomState(SEED)
+        rng.shuffle(uniq)
+        n_val = max(1, int(round(len(uniq) * args.val_frac)))
+        val_groups = set(uniq[:n_val])
+        val_idx = np.where([g in val_groups for g in groups])[0]
+        tr_idx = np.where([g not in val_groups for g in groups])[0]
+        print(f"{len(X)} samples, {len(uniq)} scenes -> "
+              f"train {len(tr_idx)} / val {len(val_idx)} "
+              f"(val pill share {y[val_idx].mean():.2f})")
 
     model = Net()
     n_par = sum(p.numel() for p in model.parameters())

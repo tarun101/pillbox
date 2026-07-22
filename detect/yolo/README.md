@@ -43,5 +43,12 @@ name the "pill present" one with `full` or `pill` (e.g. `Empty` / `Full`).
 From a `.pt`:
 
 ```bash
-yolo export model=best.pt format=onnx imgsz=640
+yolo export model=best.pt format=onnx imgsz=224
 ```
+
+**`imgsz` must match what the model was trained at.** `detect.py` reads the
+input size straight from the ONNX graph, so an export at the wrong size runs
+without error but silently returns near-random predictions (a 224-trained
+model exported at 640 scored ~0.51 vs ~0.80 macro-F1 on our test set). The
+shipped `best.pt` is a **224** model — export it at `imgsz=224`. If you don't
+know the training size, check the `.pt`'s `model.args['imgsz']`.

@@ -332,6 +332,7 @@ def main():
 
     json.dump({"split": args.split, "table1": table1, "models": results,
                "host": _host_desc()}, open(out / "metrics.json", "w"), indent=2)
+    write_notes(out, results, args)
     write_model_table(out, results)
     write_figures(out, results, full_keys, de_all, labels, photos, models,
                   args)
@@ -342,6 +343,42 @@ def _host_desc():
     import platform
     return {"machine": platform.machine(), "processor": platform.processor(),
             "python": platform.python_version()}
+
+
+def write_notes(out, results, args):
+    """Self-documenting caveats so paper numbers aren't misread."""
+    host = _host_desc()
+    on_pi = host["machine"].startswith(("arm", "aarch"))
+    lines = [
+        "# How to read these numbers\n",
+        f"- **Eval set:** `{args.split}` split.  Accuracy / precision / recall /",
+        "  F1 / RMSE / ΔE are deterministic — identical on Pi, Mac or cloud",
+        "  (bit-level FP differences only flip a cell exactly on the 0.5 boundary).",
+        "  **These are paper-ready from any machine.**\n",
+        f"- **Latency:** measured on `{host['machine']} / {host['processor']}`.",
+        ("  This IS the deployment device — use directly for Figure 6 / the abstract."
+         if on_pi else
+         "  This is NOT the Pi — treat as indicative (relative ordering only)."
+         " Re-run with `--hardware` **on the Raspberry Pi** for Figure 6 and the"
+         " abstract's per-photo time."),
+        "",
+        "- **Power:** " + ("measured from the Pi 5 PMIC (net of idle)." if any(
+            results[n]["power"] for n in results) else
+            "not measured (needs the Pi 5 PMIC). Run `--hardware` on the Pi."),
+        "",
+        "- **Model provenance caveat:** DoG is untrained, so its numbers are a",
+        "  clean held-out result. The shipped Ref-CNN and YOLO were trained on",
+        "  subsets of this data *before* the current splits existed, so their",
+        "  numbers may include in-sample cells — treat as indicative until models",
+        "  with a recorded train/test split (see pillbox-data `models/*/card.json`)",
+        "  are dropped in and evaluated on the frozen `test` split.",
+        "",
+        f"- **Alignment overhead:** the per-photo latency is the full pipeline",
+        "  (locate + warp + classify all 21 cells). Box alignment is a shared",
+        "  front-end, so it inflates all models by roughly the same amount.",
+        "",
+    ]
+    (out / "README.md").write_text("\n".join(lines))
 
 
 def write_model_table(out, results):

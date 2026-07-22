@@ -14,17 +14,30 @@ label corrections and the current warp calibration, so don't commit the
 output — re-run this instead (add export/ to pillbox-data's .gitignore, or
 commit a snapshot deliberately and pin its commit in a model's card.json).
 
+Augmentation (--augment N) reproduces the Roboflow-style expansion the paper's
+YOLO was trained on: the ~1k labelled cells become ~2.7k "training images" by
+emitting N images per Train crop (the unmodified original plus N-1 augmented
+copies: horizontal flip, +/-15 deg rotation, exposure and contrast jitter).
+Augmentation is applied to the Train split ONLY — Valid and Test stay 1x, so
+evaluation is never inflated — and every copy is seeded deterministically from
+its filename, so the export is byte-reproducible run to run. This keeps the
+augmented training set reproducible from the committed sources of truth without
+storing thousands of derived crops in the data repo. --augment 3 reproduces
+roughly the 2,700-image set (643 Train cells x 3 + Valid + Test).
+
 Usage:
     python3 detect/export_dataset.py --data ~/pillbox-data
-        [--out <data>/export] [--clean]
+        [--out <data>/export] [--clean] [--augment 3]
 """
 import argparse
+import hashlib
 import json
 import shutil
 import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from detect import crop_cells  # noqa: E402
@@ -33,13 +46,37 @@ SPLIT_DIRS = {"train": "Train", "valid": "Valid", "test": "Test"}
 CLASS_DIRS = {"pill": "Full", "empty": "Empty"}
 
 
+def _seed(stem, cell, i):
+    """Stable per-copy seed (Python's hash() is salted, so hash the name)."""
+    return int(hashlib.md5(f"{stem}/{cell}/{i}".encode()).hexdigest()[:8], 16)
+
+
+def augment_crop(crop, rng):
+    """One Roboflow-style augmented copy: flip, rotate/scale, exposure, contrast."""
+    out = crop.astype(np.float32)
+    h, w = out.shape[:2]
+    if rng.rand() < 0.5:
+        out = out[:, ::-1].copy()                       # horizontal flip
+    m = cv2.getRotationMatrix2D((w / 2, h / 2),
+                                rng.uniform(-15, 15), rng.uniform(0.9, 1.1))
+    out = cv2.warpAffine(out, m, (w, h), borderMode=cv2.BORDER_REFLECT)
+    out *= rng.uniform(0.75, 1.25)                       # exposure/brightness
+    out = (out - out.mean()) * rng.uniform(0.85, 1.15) + out.mean()  # contrast
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data", required=True, help="pillbox-data checkout")
     ap.add_argument("--out", help="output root (default <data>/export)")
     ap.add_argument("--clean", action="store_true",
                     help="delete the output tree first (stale-file hygiene)")
+    ap.add_argument("--augment", type=int, default=1, metavar="N",
+                    help="emit N images per Train crop (original + N-1 augmented "
+                         "copies); Valid/Test always 1x. Default 1 (no augment). "
+                         "Use 3 to reproduce the paper's ~2,700-image train set.")
     args = ap.parse_args()
+    n_aug = max(1, args.augment)
 
     data = Path(args.data).expanduser()
     out = Path(args.out).expanduser() if args.out else data / "export"
@@ -70,6 +107,7 @@ def main():
 
     counts = {sd: {cd: 0 for cd in CLASS_DIRS.values()}
               for sd in SPLIT_DIRS.values()}
+    src_counts = {sd: 0 for sd in SPLIT_DIRS.values()}  # unaugmented cells
     skipped = []
     for stem, cells in sorted(by_stem.items()):
         split = split_of.get(stem)
@@ -96,8 +134,16 @@ def main():
             if lab not in CLASS_DIRS:
                 continue
             cls = CLASS_DIRS[lab]
-            cv2.imwrite(str(out / split / cls / f"{stem}_{cell}.jpg"), crop)
+            dst = out / split / cls
+            cv2.imwrite(str(dst / f"{stem}_{cell}.jpg"), crop)
             counts[split][cls] += 1
+            src_counts[split] += 1
+            if split == "Train" and n_aug > 1:
+                for i in range(1, n_aug):
+                    rng = np.random.RandomState(_seed(stem, cell, i))
+                    aug = augment_crop(crop, rng)
+                    cv2.imwrite(str(dst / f"{stem}_{cell}_aug{i}.jpg"), aug)
+                    counts[split][cls] += 1
 
     for stem, why in skipped:
         print(f"skipped {stem}: {why}")
@@ -106,7 +152,12 @@ def main():
         row = "  ".join(f"{cd} {counts[sd][cd]}" for cd in CLASS_DIRS.values())
         n = sum(counts[sd].values())
         total += n
-        print(f"{sd:5s}: {row}  (total {n})")
+        aug_note = ""
+        if sd == "Train" and n_aug > 1:
+            aug_note = f"  [{src_counts[sd]} cells x{n_aug}]"
+        print(f"{sd:5s}: {row}  (total {n}){aug_note}")
+    if n_aug > 1:
+        print(f"augmentation: Train x{n_aug} (Valid/Test 1x), deterministic per crop")
     print(f"exported {total} cell crops -> {out}")
 
 

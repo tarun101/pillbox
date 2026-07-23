@@ -11,8 +11,9 @@ One process owns the camera and serves everything on port 8000:
                detector's inference time and available board-power telemetry
   /stream.mjpg the MJPEG feed used by the preview page
 
-On Raspberry Pi, captures use the IMX708's full 4608x2592 still mode. On
-Jetson/Linux, a UVC/V4L2 camera supplies both preview and captured frames.
+On Raspberry Pi, captures use the IMX708's full 4608x2592 still mode.
+Jetson/Linux can use a UVC/V4L2 camera, and ESP32-CAM can supply JPEG frames
+over HTTP.
 
 Photos land in ~/photos with thumbnails in ~/photos/.thumbs.
 """

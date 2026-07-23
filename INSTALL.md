@@ -68,7 +68,7 @@ If `--list-formats-ext` shows only YUYV at the desired resolution, set
 
 | variable | default | purpose |
 |---|---|---|
-| `PILLBOX_CAMERA_BACKEND` | `auto` | `picamera2`, `v4l2`, or automatic fallback |
+| `PILLBOX_CAMERA_BACKEND` | `auto` | `picamera2`, `v4l2`, `esp32`, or automatic fallback |
 | `PILLBOX_VIDEO_DEVICE` | `/dev/video0` | Wyze/UVC video node |
 | `PILLBOX_USB_WIDTH` | `1920` | requested capture width |
 | `PILLBOX_USB_HEIGHT` | `1080` | requested capture height |
@@ -85,6 +85,58 @@ Camera Module 3. Wyze images are 1920×1080 with a different field of view.
 Streaming, capture, gallery, and downloads work immediately, but pill detection
 must be recalibrated and its reference images regenerated from the final Wyze
 mount before its results are valid.
+
+## ESP32-CAM over Wi-Fi
+
+For the Waveshare ESP32-S3-CAM-OV5640, this repository includes a separate,
+ready-to-flash firmware project in
+[`firmware/waveshare_esp32s3_ov5640`](firmware/waveshare_esp32s3_ov5640/README.md).
+
+PillWatch supports the JPEG endpoints used by Espressif's standard
+`CameraWebServer` example:
+
+- control and still capture on `http://<camera-ip>/capture`
+- multipart MJPEG on `http://<camera-ip>:81/stream`
+
+Flash and configure the official example, reserve a stable IP address for the
+camera in the router, and verify both endpoints from the PillWatch device:
+
+```bash
+curl --fail http://192.168.1.50/capture -o esp32-test.jpg
+curl --fail --max-time 3 http://192.168.1.50:81/stream -o /dev/null
+```
+
+Then select the network backend:
+
+```bash
+cat > ~/.config/pillbox.env <<'EOF'
+PILLBOX_CAMERA_BACKEND=esp32
+PILLBOX_ESP32_BASE_URL=http://192.168.1.50
+EOF
+```
+
+`PILLBOX_ESP32_BASE_URL` automatically supplies the standard `/capture` and
+port-81 `/stream` URLs. Firmware with a different layout can specify both URLs
+directly:
+
+```ini
+PILLBOX_CAMERA_BACKEND=esp32
+PILLBOX_ESP32_CAPTURE_URL=http://esp-cam.local/jpg
+PILLBOX_ESP32_STREAM_URL=http://esp-cam.local/mjpeg
+```
+
+Optional HTTP Basic Authentication credentials are
+`PILLBOX_ESP32_USERNAME` and `PILLBOX_ESP32_PASSWORD`.
+
+The backend reconnects automatically when Wi-Fi or the MJPEG response drops.
+Still capture requests a fresh JPEG from the capture endpoint and falls back
+to the latest stream frame if that request fails.
+
+Use the ESP32 camera's web UI to select its highest stable JPEG resolution
+before calibrating PillWatch. Common OV2640 modules top out at 1600×1200 and
+the standard firmware may initially stream at a much smaller size. As with the
+Wyze camera, pill detection requires a new reference photo, cell references,
+and alignment calibration after the ESP32-CAM is mounted.
 
 ## Try it out
 

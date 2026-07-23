@@ -1,8 +1,8 @@
 # pillbox
 
-Take photos from any browser using a Raspberry Pi camera or a Linux UVC webcam
-(including a Wyze Cam v2 in webcam mode) — live preview, still capture, and a
-gallery to browse and download what you've taken.
+Take photos from any browser using a Raspberry Pi camera, a Linux UVC webcam
+(including a Wyze Cam v2 in webcam mode), or an ESP32-CAM over Wi-Fi — live
+preview, still capture, and a gallery to browse and download what you've taken.
 
 ## Using it
 
@@ -40,5 +40,9 @@ Photos live on the device in `~/photos`, named by date and time
 
 ## Setup
 
-See [INSTALL.md](INSTALL.md) for Pi 4, Pi 5, and Jetson/Wyze installation,
-running it as an auto-starting daemon, and the standalone test scripts in `utils/`.
+See [INSTALL.md](INSTALL.md) for Pi 4, Pi 5, Jetson/Wyze, and ESP32-CAM
+installation, running it as an auto-starting daemon, and the standalone test
+scripts in `utils/`.
+
+The Waveshare ESP32-S3-CAM-OV5640 has its own camera-only firmware in
+[`firmware/waveshare_esp32s3_ov5640`](firmware/waveshare_esp32s3_ov5640/README.md).

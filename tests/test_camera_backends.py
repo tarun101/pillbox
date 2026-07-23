@@ -66,8 +66,104 @@ class CameraSelectionTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {"PILLBOX_CAMERA_BACKEND": "wyze"}, clear=True
         ):
-            with self.assertRaisesRegex(RuntimeError, "auto, picamera2, or v4l2"):
+            with self.assertRaisesRegex(
+                RuntimeError, "auto, picamera2, v4l2, or esp32"
+            ):
                 camera_backends.create_camera(*self.paths, *self.sizes)
+
+    @mock.patch.object(camera_backends, "ESP32Camera")
+    def test_explicit_esp32_uses_standard_camerawebserver_urls(self, esp32_camera):
+        env = {
+            "PILLBOX_CAMERA_BACKEND": "esp32",
+            "PILLBOX_ESP32_BASE_URL": "http://192.168.4.20",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            camera_backends.create_camera(*self.paths, *self.sizes)
+        _, kwargs = esp32_camera.call_args
+        self.assertEqual(kwargs["capture_url"], "http://192.168.4.20/capture")
+        self.assertEqual(kwargs["stream_url"], "http://192.168.4.20:81/stream")
+
+
+class ESP32ProtocolTests(unittest.TestCase):
+    def test_default_urls_follow_espressif_port_layout(self):
+        self.assertEqual(
+            camera_backends._default_esp32_urls("esp-cam.local"),
+            (
+                "http://esp-cam.local/capture",
+                "http://esp-cam.local:81/stream",
+            ),
+        )
+        self.assertEqual(
+            camera_backends._default_esp32_urls("http://10.0.0.5:8080"),
+            (
+                "http://10.0.0.5:8080/capture",
+                "http://10.0.0.5:8081/stream",
+            ),
+        )
+
+    def test_extracts_complete_jpeg_from_multipart_chunks(self):
+        first = b"\xff\xd8first\xff\xd9"
+        second = b"\xff\xd8second\xff\xd9"
+        frame, remainder = camera_backends._pop_jpeg(
+            b"--boundary\r\nheaders\r\n\r\n" + first + b"\r\n" + second
+        )
+        self.assertEqual(frame, first)
+        next_frame, remainder = camera_backends._pop_jpeg(remainder)
+        self.assertEqual(next_frame, second)
+        self.assertEqual(remainder, b"")
+
+    def test_keeps_partial_jpeg_for_next_network_read(self):
+        partial = b"noise\xff\xd8unfinished"
+        frame, remainder = camera_backends._pop_jpeg(partial)
+        self.assertIsNone(frame)
+        self.assertEqual(remainder, b"\xff\xd8unfinished")
+
+    def test_network_backend_streams_and_saves_capture_jpeg(self):
+        stream_jpeg = b"\xff\xd8stream\xff\xd9"
+        capture_jpeg = b"\xff\xd8capture\xff\xd9"
+
+        class Response:
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                return self.chunks.pop(0) if self.chunks else b""
+
+        def fake_urlopen(request, timeout):
+            self.assertGreater(timeout, 0)
+            if request.full_url.endswith("/capture"):
+                return Response([capture_jpeg])
+            return Response([b"multipart headers\r\n" + stream_jpeg])
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            photos, thumbs = root / "photos", root / "thumbs"
+            photos.mkdir()
+            thumbs.mkdir()
+            with mock.patch.object(camera_backends, "urlopen", fake_urlopen), \
+                    mock.patch.object(camera_backends, "_thumbnail"):
+                camera = camera_backends.ESP32Camera(
+                    photos,
+                    thumbs,
+                    (1024, 576),
+                    (4608, 2592),
+                    (400, 400),
+                    capture_url="http://esp/capture",
+                    stream_url="http://esp:81/stream",
+                    startup_timeout=1,
+                )
+                try:
+                    self.assertEqual(camera.output.frame, stream_jpeg)
+                    name = camera.capture_still()
+                    self.assertEqual((photos / name).read_bytes(), capture_jpeg)
+                finally:
+                    camera.close()
 
 
 class _FakeFrame:

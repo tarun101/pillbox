@@ -1,11 +1,14 @@
-"""Camera backends for Raspberry Pi Picamera2 and Linux V4L2/UVC cameras."""
+"""Camera backends for Picamera2, Linux V4L2/UVC, and ESP32-CAM."""
 
+import base64
 import io
 import os
 import sys
 import time
 from datetime import datetime
 from threading import Condition, Event, Lock, Thread
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 from PIL import Image
 
@@ -202,11 +205,155 @@ class V4L2Camera:
         self._thread.join(timeout=2)
 
 
+def _default_esp32_urls(base_url):
+    """Return capture/stream URLs for Espressif's CameraWebServer layout."""
+    parsed = urlsplit(base_url if "://" in base_url else f"http://{base_url}")
+    if not parsed.hostname:
+        raise RuntimeError(f"invalid PILLBOX_ESP32_BASE_URL: {base_url}")
+    capture_port = parsed.port or 80
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    capture_netloc = f"{host}:{capture_port}" if capture_port != 80 else host
+    stream_netloc = f"{host}:{capture_port + 1}"
+    capture_url = urlunsplit(
+        (parsed.scheme or "http", capture_netloc, "/capture", "", "")
+    )
+    stream_url = urlunsplit(
+        (parsed.scheme or "http", stream_netloc, "/stream", "", "")
+    )
+    return capture_url, stream_url
+
+
+def _pop_jpeg(buffer):
+    """Pop one complete JPEG from an arbitrary MJPEG byte buffer."""
+    start = buffer.find(b"\xff\xd8")
+    if start < 0:
+        return None, buffer[-1:]
+    end = buffer.find(b"\xff\xd9", start + 2)
+    if end < 0:
+        return None, buffer[start:]
+    return buffer[start:end + 2], buffer[end + 2:]
+
+
+class ESP32Camera:
+    """HTTP JPEG/MJPEG backend for Espressif CameraWebServer firmware."""
+
+    backend_name = "esp32"
+    _MAX_JPEG_BYTES = 12 * 1024 * 1024
+
+    def __init__(
+        self,
+        photo_dir,
+        thumb_dir,
+        stream_size,
+        still_size,
+        thumb_max,
+        capture_url,
+        stream_url,
+        username=None,
+        password=None,
+        startup_timeout=10.0,
+    ):
+        del stream_size, still_size
+        self.photo_dir = photo_dir
+        self.thumb_dir = thumb_dir
+        self.thumb_max = thumb_max
+        self.capture_url = capture_url
+        self.stream_url = stream_url
+        self.output = FrameOutput()
+        self._frame_lock = Lock()
+        self._latest_jpeg = None
+        self._last_error = None
+        self._stop = Event()
+        self._headers = {"User-Agent": "PillWatch/1.0"}
+        if username:
+            token = base64.b64encode(
+                f"{username}:{password or ''}".encode()
+            ).decode()
+            self._headers["Authorization"] = f"Basic {token}"
+
+        self._thread = Thread(target=self._stream_loop, daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + startup_timeout
+        with self.output.condition:
+            while self.output.frame is None and time.monotonic() < deadline:
+                self.output.condition.wait(timeout=0.2)
+        if self.output.frame is None:
+            error = self._last_error or "no JPEG frames received"
+            self.close()
+            raise RuntimeError(
+                f"ESP32-CAM stream produced no frames at {stream_url}: {error}"
+            )
+        print(
+            f"camera backend=esp32 stream={stream_url} capture={capture_url}",
+            file=sys.stderr,
+        )
+
+    def _request(self, url):
+        return Request(url, headers=self._headers)
+
+    def _publish(self, jpeg):
+        with self._frame_lock:
+            self._latest_jpeg = jpeg
+        self.output.write(jpeg)
+
+    def _stream_loop(self):
+        while not self._stop.is_set():
+            try:
+                with urlopen(self._request(self.stream_url), timeout=5) as response:
+                    buffer = b""
+                    while not self._stop.is_set():
+                        chunk = response.read(4096)
+                        if not chunk:
+                            raise RuntimeError("stream closed")
+                        buffer += chunk
+                        while True:
+                            jpeg, buffer = _pop_jpeg(buffer)
+                            if jpeg is None:
+                                break
+                            self._publish(jpeg)
+                        if len(buffer) > self._MAX_JPEG_BYTES:
+                            raise RuntimeError("JPEG frame exceeded safety limit")
+            except Exception as exc:
+                self._last_error = str(exc)
+                self._stop.wait(0.5)
+
+    def _fetch_still(self):
+        with urlopen(self._request(self.capture_url), timeout=8) as response:
+            data = response.read(self._MAX_JPEG_BYTES + 1)
+        if len(data) > self._MAX_JPEG_BYTES:
+            raise RuntimeError("captured JPEG exceeded safety limit")
+        start, end = data.find(b"\xff\xd8"), data.rfind(b"\xff\xd9")
+        if start < 0 or end < start:
+            raise RuntimeError("capture endpoint did not return a JPEG")
+        return data[start:end + 2]
+
+    def capture_still(self):
+        try:
+            jpeg = self._fetch_still()
+        except Exception as exc:
+            with self._frame_lock:
+                jpeg = self._latest_jpeg
+            if jpeg is None:
+                raise RuntimeError(f"ESP32-CAM capture failed: {exc}") from exc
+        name = datetime.now().strftime("photo_%Y%m%d_%H%M%S.jpg")
+        path = self.photo_dir / name
+        path.write_bytes(jpeg)
+        _thumbnail(path, self.thumb_dir / name, self.thumb_max)
+        return name
+
+    def close(self):
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+
 def create_camera(photo_dir, thumb_dir, stream_size, still_size, thumb_max):
     """Create the configured camera backend.
 
-    ``auto`` prefers Picamera2 and falls back to V4L2. Explicit configuration
-    avoids accidentally selecting a USB capture dongle on a Raspberry Pi.
+    ``auto`` prefers Picamera2, then V4L2, then a configured ESP32 base URL.
+    Explicit configuration avoids accidentally selecting a USB capture dongle
+    on a Raspberry Pi.
     """
     backend = os.environ.get("PILLBOX_CAMERA_BACKEND", "auto").strip().lower()
     common = (photo_dir, thumb_dir, stream_size, still_size, thumb_max)
@@ -221,9 +368,29 @@ def create_camera(photo_dir, thumb_dir, stream_size, still_size, thumb_max):
             fps=int(os.environ.get("PILLBOX_USB_FPS", "15")),
             fourcc=os.environ.get("PILLBOX_USB_FOURCC", "MJPG"),
         )
+    if backend == "esp32":
+        base_url = os.environ.get("PILLBOX_ESP32_BASE_URL")
+        capture_url = os.environ.get("PILLBOX_ESP32_CAPTURE_URL")
+        stream_url = os.environ.get("PILLBOX_ESP32_STREAM_URL")
+        if base_url:
+            default_capture, default_stream = _default_esp32_urls(base_url)
+            capture_url = capture_url or default_capture
+            stream_url = stream_url or default_stream
+        if not capture_url or not stream_url:
+            raise RuntimeError(
+                "ESP32 backend needs PILLBOX_ESP32_BASE_URL or both "
+                "PILLBOX_ESP32_CAPTURE_URL and PILLBOX_ESP32_STREAM_URL"
+            )
+        return ESP32Camera(
+            *common,
+            capture_url=capture_url,
+            stream_url=stream_url,
+            username=os.environ.get("PILLBOX_ESP32_USERNAME"),
+            password=os.environ.get("PILLBOX_ESP32_PASSWORD"),
+        )
     if backend != "auto":
         raise RuntimeError(
-            "PILLBOX_CAMERA_BACKEND must be auto, picamera2, or v4l2"
+            "PILLBOX_CAMERA_BACKEND must be auto, picamera2, v4l2, or esp32"
         )
     try:
         return Picamera2Camera(*common)
@@ -238,6 +405,20 @@ def create_camera(photo_dir, thumb_dir, stream_size, still_size, thumb_max):
                 fourcc=os.environ.get("PILLBOX_USB_FOURCC", "MJPG"),
             )
         except RuntimeError as usb_error:
+            esp32_base = os.environ.get("PILLBOX_ESP32_BASE_URL")
+            if esp32_base:
+                capture_url, stream_url = _default_esp32_urls(esp32_base)
+                return ESP32Camera(
+                    *common,
+                    capture_url=os.environ.get(
+                        "PILLBOX_ESP32_CAPTURE_URL", capture_url
+                    ),
+                    stream_url=os.environ.get(
+                        "PILLBOX_ESP32_STREAM_URL", stream_url
+                    ),
+                    username=os.environ.get("PILLBOX_ESP32_USERNAME"),
+                    password=os.environ.get("PILLBOX_ESP32_PASSWORD"),
+                )
             raise RuntimeError(
                 f"no usable camera backend: Picamera2: {pi_error}; "
                 f"V4L2: {usb_error}"

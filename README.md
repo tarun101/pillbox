@@ -1,7 +1,8 @@
 # pillbox
 
-Take photos with a Raspberry Pi camera from any browser — live preview, full-resolution
-capture, and a gallery to browse and download what you've taken.
+Take photos from any browser using a Raspberry Pi camera or a Linux UVC webcam
+(including a Wyze Cam v2 in webcam mode) — live preview, still capture, and a
+gallery to browse and download what you've taken.
 
 ## Using it
 
@@ -30,14 +31,14 @@ remembered for 30 days (and until the app restarts).
 - Shows which of the 21 pillbox cells (7 days × morning/noon/night) contain a
   pill in the latest photo, as a green/grey grid. Append `?photo=<name>` to
   check an older photo.
-- Detection runs on the Pi with a small CNN — see [detect/README.md](detect/README.md).
+- Detection runs locally on the device with a small CNN — see [detect/README.md](detect/README.md).
   It needs `opencv-python-headless`, `numpy` and `onnxruntime` installed; the
   page tells you if something is missing.
 
-Photos live on the Pi in `~/photos`, named by date and time
+Photos live on the device in `~/photos`, named by date and time
 (e.g. `photo_20260712_123030.jpg`).
 
 ## Setup
 
-See [INSTALL.md](INSTALL.md) for installation, running it as an auto-starting daemon,
-hardware notes (Pi 4 vs Pi 5), and the standalone test scripts in `utils/`.
+See [INSTALL.md](INSTALL.md) for Pi 4, Pi 5, and Jetson/Wyze installation,
+running it as an auto-starting daemon, and the standalone test scripts in `utils/`.

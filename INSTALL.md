@@ -1,9 +1,9 @@
 # Install & technical notes
 
-The camera app (`pillbox_app.py`) uses only `picamera2` and Pillow — both
-preinstalled on Raspberry Pi OS (Bookworm and later). The `/status` pill-detection
-page additionally needs `opencv-python-headless`, `numpy` and `onnxruntime`.
-Without those the camera and gallery still work; `/status` shows what to install.
+On Raspberry Pi, the camera app (`pillbox_app.py`) uses `picamera2` and
+Pillow, both preinstalled on Raspberry Pi OS (Bookworm and later). On
+Jetson/Linux, its V4L2/UVC backend additionally uses OpenCV. The `/status`
+pill-detection page needs OpenCV, NumPy, and ONNX Runtime on every platform.
 Detection also reads the model and reference images from the repo (`detect/`,
 `images/`), so clone the whole repo rather than copying the single file.
 
@@ -19,6 +19,72 @@ python3 -m venv --system-site-packages ~/pillbox/venv
 
 (The install pulls prebuilt wheels from piwheels; a few minutes on a Pi 4 is
 normal.)
+
+## Jetson Orin Nano + Wyze Cam v2
+
+The Wyze Cam v2 (model `WYZEC2`, including UPC `859696007004`) can expose a
+USB video device after installing Wyze's special webcam firmware:
+
+<https://support.wyze.com/hc/en-us/articles/360041605111-Webcam-Firmware-Instructions>
+
+Wyze only confirms that firmware on Windows and macOS, so verify it on the
+Jetson before configuring PillWatch:
+
+```bash
+sudo apt update
+sudo apt install -y v4l-utils python3-venv python3-opencv python3-pil
+v4l2-ctl --list-devices
+v4l2-ctl --device=/dev/video0 --list-formats-ext
+```
+
+The camera should appear as `HD USB Camera` with one or more `/dev/video*`
+nodes. Use the node that offers an MJPEG or YUYV capture format.
+
+Create the application environment and install inference dependencies:
+
+```bash
+cd ~ && git clone https://github.com/tarun101/pillbox.git
+python3 -m venv --system-site-packages ~/pillbox/venv
+~/pillbox/venv/bin/pip install numpy onnxruntime
+```
+
+Configure the V4L2 backend through the environment file read by
+`pillbox.service`:
+
+```bash
+mkdir -p ~/.config
+cat > ~/.config/pillbox.env <<'EOF'
+PILLBOX_CAMERA_BACKEND=v4l2
+PILLBOX_VIDEO_DEVICE=/dev/video0
+PILLBOX_USB_WIDTH=1920
+PILLBOX_USB_HEIGHT=1080
+PILLBOX_USB_FPS=15
+PILLBOX_USB_FOURCC=MJPG
+EOF
+```
+
+If `--list-formats-ext` shows only YUYV at the desired resolution, set
+`PILLBOX_USB_FOURCC=YUYV`. The supported camera settings are:
+
+| variable | default | purpose |
+|---|---|---|
+| `PILLBOX_CAMERA_BACKEND` | `auto` | `picamera2`, `v4l2`, or automatic fallback |
+| `PILLBOX_VIDEO_DEVICE` | `/dev/video0` | Wyze/UVC video node |
+| `PILLBOX_USB_WIDTH` | `1920` | requested capture width |
+| `PILLBOX_USB_HEIGHT` | `1080` | requested capture height |
+| `PILLBOX_USB_FPS` | `15` | requested frame rate |
+| `PILLBOX_USB_FOURCC` | `MJPG` | requested four-character V4L2 format |
+
+The UVC backend uses the latest full camera frame for still capture while a
+background thread supplies the MJPEG preview. Raspberry Pi systems continue to
+use Picamera2 and its separate full-resolution still mode.
+
+**Detection calibration:** the current alignment coordinates, empty-box
+reference image, and reference cell crops were made with the 4608×2592 Pi
+Camera Module 3. Wyze images are 1920×1080 with a different field of view.
+Streaming, capture, gallery, and downloads work immediately, but pill detection
+must be recalibrated and its reference images regenerated from the final Wyze
+mount before its results are valid.
 
 ## Try it out
 

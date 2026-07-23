@@ -10,7 +10,7 @@ One entry point for the paper's numbers and figures:
   metrics.json               everything above, machine-readable
   fig_models.png             grouped bar of accuracy & per-class F1 per model
   fig5_camouflage.png        FIGURE 5 — accuracy vs pill-to-lid colour diff (ΔE)
-  fig6_hardware.png          FIGURE 6 — per-model latency (+ power on a Pi 5)
+  fig6_hardware.png          FIGURE 6 — per-model latency (+ board power)
 
 What is portable and what is not
 --------------------------------
@@ -24,9 +24,11 @@ Latency and power are hardware-specific. Run
 
     python3 -m detect.paper_stats --data ../pillbox-data --hardware
 
-*on the Raspberry Pi* to fill Figure 6 and the abstract's "[X] ms". Off-device,
-latency is still measured but is only indicative (relative between models), and
-power is omitted unless the Pi 5 PMIC is readable.
+*on the deployment device* (Raspberry Pi 4, Raspberry Pi 5, or NVIDIA Jetson
+Orin Nano) to fill Figure 6 and the abstract's "[X] ms". Off-device, latency is
+still measured but is only indicative (relative between models). Board power is
+measured on Pi 5 and Jetson; Pi 4 runs latency-only because it does not expose
+total board-power telemetry.
 
 Usage
 -----
@@ -47,6 +49,7 @@ import numpy as np
 from . import crop_cells
 from .camouflage_eval import (BIN_EDGES, BIN_LABELS, bin_index, delta_e,
                               load_reference_cells, pill_lid_colours)
+from .hardware_power import classify_device_model, read_power_watts
 
 # name, module (analyze(photo)->{CELL:{pill,...}}), onnx weights (for params), blurb
 MODELS = [
@@ -189,36 +192,23 @@ def compute_delta_e(full_keys, photo_of, ref_cells):
 
 
 # --------------------------------------------------------------------------- #
-# power sampling (Pi 5 PMIC) — for --hardware runs
+# hardware sampling (Pi 4 latency; Pi 5/Jetson latency + power)
 # --------------------------------------------------------------------------- #
-def read_power_watts():
-    import re
-    import subprocess
-    try:
-        out = subprocess.run(["vcgencmd", "pmic_read_adc"],
-                             capture_output=True, text=True, timeout=2)
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
-        return None
-    volts, amps = {}, {}
-    for line in out.stdout.splitlines():
-        m = re.match(r"\s*(\S+)_([AV])\s+\S+=([0-9.]+)[AV]\s*$", line)
-        if m:
-            (amps if m.group(2) == "A" else volts)[m.group(1)] = float(m.group(3))
-    p = sum(v * amps[n] for n, v in volts.items() if n in amps)
-    return round(p, 2) if p > 0 else None
-
-
 def measure_power(module_name, photos, seconds=8.0):
     """Average board power while a model runs analyze() in a loop, minus idle."""
     from threading import Event, Thread
-    base = read_power_watts()
+    base, source = read_power_watts(with_source=True)
     if base is None:
         return None
-    idle = np.mean([read_power_watts() for _ in range(5)])
+    idle_samples = [read_power_watts() for _ in range(5)]
+    idle_samples = [w for w in idle_samples if w is not None]
+    if not idle_samples:
+        return None
+    idle = float(np.mean(idle_samples))
     mod = importlib.import_module(module_name)
     paths = list(photos.values())
+    if not paths:
+        return None
     mod.analyze(paths[0])  # warmup
     samples, stop = [], Event()
 
@@ -240,7 +230,7 @@ def measure_power(module_name, photos, seconds=8.0):
         return None
     avg = float(np.mean(samples))
     return {"avg_watts": round(avg, 2), "idle_watts": round(float(idle), 2),
-            "net_watts": round(max(0.0, avg - idle), 2)}
+            "net_watts": round(max(0.0, avg - idle), 2), "source": source}
 
 
 # --------------------------------------------------------------------------- #
@@ -254,7 +244,8 @@ def main():
     ap.add_argument("--models", default="dog,cnn,yolo")
     ap.add_argument("--latency-reps", type=int, default=5)
     ap.add_argument("--hardware", action="store_true",
-                    help="also measure board power (Pi 5) for Figure 6")
+                    help=("collect deployment-device metrics (Pi 5/Jetson power; "
+                          "Pi 4 latency-only) for Figure 6"))
     ap.add_argument("--camo-max-de", type=float, default=None,
                     help="ΔE pinned to 100%% in the pct column (default: dataset max)")
     args = ap.parse_args()
@@ -341,30 +332,52 @@ def main():
 
 def _host_desc():
     import platform
+    model = None
+    try:
+        model = Path("/proc/device-tree/model").read_bytes().rstrip(b"\0").decode()
+    except (OSError, UnicodeError):
+        pass
+    device = classify_device_model(model)
     return {"machine": platform.machine(), "processor": platform.processor(),
-            "python": platform.python_version()}
+            "python": platform.python_version(), "device": device,
+            "device_model": model}
 
 
 def write_notes(out, results, args):
     """Self-documenting caveats so paper numbers aren't misread."""
     host = _host_desc()
-    on_pi = host["machine"].startswith(("arm", "aarch"))
+    on_deployment_device = host["device"] in (
+        "raspberry_pi", "raspberry_pi_4", "raspberry_pi_5", "jetson",
+    )
+    device_label = host["device_model"] or host["machine"]
+    power_sources = {r["power"]["source"] for r in results.values()
+                     if r["power"] and r["power"].get("source")}
+    if "jetson_tegrastats" in power_sources:
+        power_note = "measured from Jetson tegrastats (net of idle)."
+    elif "raspberry_pi_pmic" in power_sources:
+        power_note = "measured from the Pi 5 PMIC (net of idle)."
+    elif host["device"] == "raspberry_pi_4":
+        power_note = (
+            "not measured: Raspberry Pi 4 has no supported onboard total-board "
+            "power telemetry. Latency results are still valid."
+        )
+    else:
+        power_note = ("not measured (needs the Pi 5 PMIC or Jetson tegrastats). "
+                      "Run `--hardware` on the deployment device.")
     lines = [
         "# How to read these numbers\n",
         f"- **Eval set:** `{args.split}` split.  Accuracy / precision / recall /",
         "  F1 / RMSE / ΔE are deterministic — identical on Pi, Mac or cloud",
         "  (bit-level FP differences only flip a cell exactly on the 0.5 boundary).",
         "  **These are paper-ready from any machine.**\n",
-        f"- **Latency:** measured on `{host['machine']} / {host['processor']}`.",
+        f"- **Latency:** measured on `{device_label}`.",
         ("  This IS the deployment device — use directly for Figure 6 / the abstract."
-         if on_pi else
-         "  This is NOT the Pi — treat as indicative (relative ordering only)."
-         " Re-run with `--hardware` **on the Raspberry Pi** for Figure 6 and the"
-         " abstract's per-photo time."),
+         if on_deployment_device else
+         "  This is NOT a recognized Pi 4, Pi 5, or Jetson — treat as indicative "
+         "(relative ordering only). Re-run with `--hardware` **on the deployment "
+         "device** for Figure 6 and the abstract's per-photo time."),
         "",
-        "- **Power:** " + ("measured from the Pi 5 PMIC (net of idle)." if any(
-            results[n]["power"] for n in results) else
-            "not measured (needs the Pi 5 PMIC). Run `--hardware` on the Pi."),
+        "- **Power:** " + power_note,
         "",
         "- **Model provenance caveat:** DoG is untrained, so its numbers are a",
         "  clean held-out result. The shipped Ref-CNN and YOLO were trained on",
@@ -500,7 +513,14 @@ def write_figures(out, results, full_keys, de_all, labels, photos, models, args)
            else 0 for n in names]
     axes[0][0].bar(names, lat, color="#4477aa")
     axes[0][0].set_ylabel("inference time (ms / photo)")
-    axes[0][0].set_title("Latency" + ("" if have_power else "  (host — run on Pi for Fig 6)"))
+    host = _host_desc()
+    if have_power:
+        latency_suffix = ""
+    elif args.hardware and host["device"] == "raspberry_pi_4":
+        latency_suffix = "  (Pi 4; board power unavailable)"
+    else:
+        latency_suffix = "  (host — run on device for Fig 6)"
+    axes[0][0].set_title("Latency" + latency_suffix)
     for i, v in enumerate(lat):
         axes[0][0].annotate(f"{v:.0f}", (i, v), ha="center", va="bottom", fontsize=9)
     if have_power:

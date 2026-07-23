@@ -4,6 +4,7 @@ Description=Pillbox camera web app
 [Service]
 # The venv is created with --system-site-packages so the apt-installed
 # picamera2 stays importable; see INSTALL.md.
+EnvironmentFile=-%h/.config/pillbox.env
 ExecStart=%h/pillbox/venv/bin/python3 %h/pillbox/pillbox_app.py
 # Retry if the camera isn't ready yet at boot, or after a crash.
 Restart=always

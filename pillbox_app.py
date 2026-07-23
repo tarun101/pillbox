@@ -8,23 +8,19 @@ One process owns the camera and serves everything on port 8000:
                or run all three detectors on a single photo (the Analyze button)
   /status      which of the 21 pillbox cells contain a pill (latest photo),
                compared across the DoG, CNN and YOLO detectors, with each
-               detector's inference time and (on a Pi 5) power draw
+               detector's inference time and available board-power telemetry
   /stream.mjpg the MJPEG feed used by the preview page
 
-Captures are full sensor resolution (4608x2592 on the imx708). The camera has
-to switch out of video mode for each still, so the preview freezes for a
-moment per shot — the page shows a "Capturing…" overlay while that happens.
+On Raspberry Pi, captures use the IMX708's full 4608x2592 still mode. On
+Jetson/Linux, a UVC/V4L2 camera supplies both preview and captured frames.
 
 Photos land in ~/photos with thumbnails in ~/photos/.thumbs.
 """
-import io
 import json
 import os
-import re
 import secrets
 import shutil
 import socketserver
-import subprocess
 import sys
 import tempfile
 import time
@@ -32,13 +28,11 @@ import zipfile
 from datetime import datetime
 from http import server
 from pathlib import Path
-from threading import Condition, Event, Lock, Thread
+from threading import Event, Lock, Thread
 from urllib.parse import parse_qs, unquote
 
-from PIL import Image
-from picamera2 import Picamera2
-from picamera2.encoders import MJPEGEncoder
-from picamera2.outputs import FileOutput
+from camera_backends import create_camera
+from detect.hardware_power import read_power_watts
 
 PHOTO_DIR = Path.home() / "photos"
 THUMB_DIR = PHOTO_DIR / ".thumbs"
@@ -642,48 +636,6 @@ def render_status_page(photo, analysis, error=None):
     return "".join(parts)
 
 
-class StreamingOutput(io.BufferedIOBase):
-    def __init__(self):
-        self.frame = None
-        self.condition = Condition()
-
-    def write(self, buf):
-        with self.condition:
-            self.frame = buf
-            self.condition.notify_all()
-
-
-class Camera:
-    """Owns the Picamera2 instance; serializes captures against streaming."""
-
-    def __init__(self):
-        self.picam2 = Picamera2()
-        self.video_config = self.picam2.create_video_configuration(main={"size": STREAM_SIZE})
-        self.still_config = self.picam2.create_still_configuration(main={"size": STILL_SIZE})
-        self.output = StreamingOutput()
-        self.lock = Lock()
-        self.picam2.configure(self.video_config)
-        self.picam2.start_recording(MJPEGEncoder(), FileOutput(self.output))
-
-    def capture_still(self):
-        name = datetime.now().strftime("photo_%Y%m%d_%H%M%S.jpg")
-        path = PHOTO_DIR / name
-        with self.lock:
-            self.picam2.stop_recording()
-            try:
-                self.picam2.configure(self.still_config)
-                self.picam2.start()
-                self.picam2.capture_file(str(path))
-                self.picam2.stop()
-            finally:
-                self.picam2.configure(self.video_config)
-                self.picam2.start_recording(MJPEGEncoder(), FileOutput(self.output))
-        with Image.open(path) as im:
-            im.thumbnail(THUMB_MAX)
-            im.save(THUMB_DIR / name, quality=70)
-        return name
-
-
 def list_photos():
     return sorted((p.name for p in PHOTO_DIR.glob("photo_*.jpg")), reverse=True)
 
@@ -751,37 +703,16 @@ DETECTORS = [
 
 
 def _read_power_watts():
-    """Total board power in watts from the Pi 5 PMIC, or None if unavailable.
-
-    `vcgencmd pmic_read_adc` reports a voltage and a current per rail; the
-    board draw is the sum of V*I across rails. Only Raspberry Pi 5 exposes
-    this — on a Pi 4 (or without permission) the command fails and we return
-    None, so power simply isn't reported.
-    """
-    try:
-        out = subprocess.run(["vcgencmd", "pmic_read_adc"],
-                             capture_output=True, text=True, timeout=2)
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
-        return None
-    volts, amps = {}, {}
-    for line in out.stdout.splitlines():
-        # e.g. "VDD_CORE_A current(7)=6.34765A" / "VDD_CORE_V volt(24)=0.72V"
-        m = re.match(r"\s*(\S+)_([AV])\s+\S+=([0-9.]+)[AV]\s*$", line)
-        if not m:
-            continue
-        (amps if m.group(2) == "A" else volts)[m.group(1)] = float(m.group(3))
-    power = sum(v * amps[n] for n, v in volts.items() if n in amps)
-    return round(power, 2) if power > 0 else None
+    """Total board power on Pi 5 or Jetson, or None when unavailable."""
+    return read_power_watts()
 
 
 def _measure_baseline(n=5, interval=0.08):
     """Average idle board power (W) from a few PMIC samples, or None.
 
     Taken just before the detector loop so each detector's draw can be
-    reported net of the Pi's resting draw (idle SoC + camera + anything else
-    running). None when the PMIC isn't readable (e.g. a Pi 4).
+    reported net of the device's resting draw (idle SoC + camera + anything
+    else running). None when board telemetry is unavailable (e.g. a Pi 4).
     """
     samples = []
     for i in range(n):
@@ -794,12 +725,12 @@ def _measure_baseline(n=5, interval=0.08):
 
 
 class _Meter:
-    """Times a block and samples board power (Pi 5 PMIC) while it runs.
+    """Times a block and samples board power while it runs.
 
     Used as a context manager around one detector's analyze() call. `.stats`
-    always has elapsed_s; avg/peak watts and energy are added only when the
-    PMIC is readable. Wall time includes any one-time model load on the first
-    photo analysed after start.
+    always has elapsed_s; avg/peak watts and energy are added only when board
+    telemetry is readable. Wall time includes any one-time model load on the
+    first photo analysed after start.
     """
 
     def __init__(self, baseline=None):
@@ -867,9 +798,9 @@ def analyze_photo(photo):
     """Run every detector on one photo (cached).
 
     Returns {method_key: {"label", "desc", "metric", "results", "error",
-    "perf"}}. `perf` carries the detector's wall-clock time and, on a Pi 5,
-    its board power draw while it ran — reported net of an idle baseline
-    sampled just before the detectors run (net_watts / net_energy_j).
+    "perf"}}. `perf` carries the detector's wall-clock time and, on a Pi 5 or
+    Jetson, its board power draw while it ran — reported net of an idle
+    baseline sampled just before the detectors run (net_watts / net_energy_j).
     """
     if photo in STATUS_CACHE:
         return STATUS_CACHE[photo]
@@ -1332,11 +1263,21 @@ class StreamingServer(socketserver.ThreadingMixIn, server.HTTPServer):
     daemon_threads = True
 
 
-PHOTO_DIR.mkdir(exist_ok=True)
-THUMB_DIR.mkdir(exist_ok=True)
-camera = Camera()
+camera = None
 
-try:
-    StreamingServer(("", 8000), Handler).serve_forever()
-finally:
-    camera.picam2.stop_recording()
+
+def main():
+    global camera
+    PHOTO_DIR.mkdir(exist_ok=True)
+    THUMB_DIR.mkdir(exist_ok=True)
+    camera = create_camera(
+        PHOTO_DIR, THUMB_DIR, STREAM_SIZE, STILL_SIZE, THUMB_MAX
+    )
+    try:
+        StreamingServer(("", 8000), Handler).serve_forever()
+    finally:
+        camera.close()
+
+
+if __name__ == "__main__":
+    main()
